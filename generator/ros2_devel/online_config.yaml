@@ -1,28 +1,71 @@
+path: /home/shaqiloheal/ros2_ws/src/
 
-path: /home/parallels/dev_ws/src/ # this is the path to the ros workspace you'd like the monitor package in
-nodes: # here we list the nodes we are going to monitor
+nodes:
   - node:
       name: talker
       package: py_pubsub
-      path: /home/parallels/dev_ws/src/py_pubsub/run.launch
+      path: /home/shaqiloheal/ros2_ws/src/py_pubsub/run.launch
   - node:
       name: listener
       package: py_pubsub
-      path: /home/parallels/dev_ws/src/py_pubsub/run.launch
+      path: /home/shaqiloheal/ros2_ws/src/py_pubsub/run.launch
+  - node:
+      name: temperature_publisher
+      package: temperature_sensor
+      path: /home/shaqiloheal/ros2_ws/src/temperature_sensor/run.launch
+  # - node:
+  #     name: minimal_service
+  #     package: py_srvcli
+  #     path: /home/shaqiloheal/ros2_ws/src/py_srvcli/run.launch
+  # - node:
+  #     name: minimal_client_async
+  #     package: py_srvcli
+  #     path: /home/shaqiloheal/ros2_ws/src/py_srvcli/run.launch
 
-monitors: # here we list the monitors we are going to generate
+monitors:
   - monitor:
-      id: monitor_0
-      log: ./log.txt # file where the monitor will log the observed events
-      silent: False # we let the monitor to print info during its execution
-      oracle: # the oracle running and ready to check the specification (localhost in this case)
-        port: 8080 # the port where it is listening
-        url: 127.0.0.1 # the url where it is listening
-        action: nothing # the oracle will not change the message
-      topics: # the list of topics this monitor is going to intercept
-        - name: chatter # name of the topic
-          type: std_msgs.msg.String # type of the topic
+      id: monitor_pubsub
+      log: ./log_pubsub.txt
+      silent: False
+      oracle:
+        port: 8080
+        url: 127.0.0.1
+        action: nothing
+      topics:
+        - name: chatter
+          type: std_msgs.msg.String
           action: filter
           publishers:
-           - talker
-      
+            - talker
+        - name: numbers
+          type: std_msgs.msg.Int32
+          action: log
+        - name: status
+          type: std_msgs.msg.Bool
+          action: log
+
+  - monitor:
+      id: monitor_temperature
+      log: ./log_temperature.txt
+      silent: False
+      oracle:
+        port: 8080
+        url: 127.0.0.1
+        action: nothing
+      topics:
+        - name: temperature
+          type: std_msgs.msg.Float32
+          action: log
+
+  # - monitor:
+  #     id: monitor_services
+  #     log: ./log_services.txt
+  #     silent: False
+  #     oracle:
+  #       port: 8080
+  #       url: 127.0.0.1
+  #       action: nothing
+  #     services:
+  #       - name: add_two_ints
+  #         type: example_interfaces.srv.AddTwoInts
+  #         action: log

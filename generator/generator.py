@@ -21,204 +21,1421 @@
 # SOFTWARE.
 
 import os
+import sys
+sys.path.append(os.path.join(os.path.dirname(__file__),'code/monitor/'))
 import yaml
 import xml.etree.ElementTree as ET
+from jedi.inference.names import AbstractNameDefinition
+from prompt_toolkit.layout.controls import GetLinePrefixCallable
+from gi._gtktemplate import Child
+import setup_resources as sr
 
-def create_monitor(monitor_id, topics_with_types_and_action, log, url, port, oracle_action, silent, warning): # function which creates the python ROS monitor
-    with open('../monitor/src/' + monitor_id + '.py', 'w') as monitor: # the monitor code will be in monitor.py
-    # write the imports the monitor is gonna need
-        imports = '''#!/usr/bin/env python\nimport rospy\nimport sys'''
-        imports += '''\nimport json\nimport yaml\nimport websocket'''
-        imports += '''\nfrom threading import *\nfrom rospy_message_converter import message_converter\nfrom monitor.msg import *'''
-        imports += '''\nfrom std_msgs.msg import String\n\nws_lock = Lock()'''
+
+class CodeGenAndROSUtils():
+
+    # just for code gent 
+    def __init__(self):
+        self.indent_level = 0 
+        self.new_line = '\n'
+        self.debug = False
+        
+    def reset_indent(self,msg):
+        if self.debug:
+            print(msg+" Resetting indent level from {0} to 0".format(self.indent_level))
+        self.indent_level=0
+        
+    def check_indent(self,msg):
+        if self.debug:
+            print(msg+" Indent level: {0}".format(self.indent_level))
+
+
+    def inc_indent(self, current_indent):
+        self.indent_level+=1
+        return current_indent + "\t"
+    
+    def dec_indent(self, current_indent):
+        if self.indent_level <=0:
+            print("Error with the indentation perhaps, trying to decrement an indent incorrectly")
+        if current_indent == '':
+            return current_indent
+        else:
+            # from https://stackoverflow.com/questions/2556108/rreplace-how-to-replace-the-last-occurrence-of-an-expression-in-a-string
+            toremove = "\t"
+            replacewith = ""
+            maxreplace = 1
+            new_indent = replacewith.join(current_indent.rsplit(toremove, maxreplace))
+            self.indent_level-=1
+            return new_indent
+    
+    
+    ''' this is an array of lines'''
+
+    def write_lines(self, lines, monitor_id,monloc):
+        with open( monloc+monitor_id + '.py', 'w') as mon:
+            for l in lines:
+                mon.write(l)
+        
+    def create_python_header(self):
+        return '#!/usr/bin/env python\n'    
+     
+     
+    def append_lines_to_list_with_prefix(self,linelist,lines,lineprefix):
+        for l in lines:
+            linelist.append(lineprefix+l)
+        return linelist
+    
+        
+    # ROS things 
+    def get_ros_info_logging_line(self, text):
+        return 'self.get_logger().info({0})\n'.format(text)
+    
+    def get_ros_time_line(self):
+        return 'float(self.get_clock().now().to_msg().sec)'
+
+        
+        
+        
+    def ros_subscriber_creation_command(self,subname,subtype,callbackname,qsize,doStringName=True):
+        if doStringName:
+            return "self.create_subscription(topic='{tname}',msg_type={ttype},callback={cbname},qos_profile={qs})\n".format(tname=subname,ttype=subtype,cbname=callbackname,qs=qsize)
+        else:
+            return "self.create_subscription(topic={tname},msg_type={ttype},callback={cbname},qos_profile={qs})\n".format(tname=subname,ttype=subtype,cbn=callbackname,qs=qsize)    
+        
+    def ros_server_service_creation_command(self,srvname,srvtype,callbackname,doStringName=True):
+        if doStringName:
+            return "self.create_service({srvtype}, '{srvname}', {cbname}, callback_group=MutuallyExclusiveCallbackGroup())\n".format(srvname=srvname,srvtype=srvtype,cbname=callbackname)
+        else:
+            return "self.create_service({srvtype}, {srvname}, {cbname},callback_group=MutuallyExclusiveCallbackGroup())\n".format(srvname=srvname,srvtype=srvtype,cbname=callbackname)
+        
+        
+    def ros_publisher_creation_command(self, pubname, pubtype, qsize, doStringName=True):
+        if doStringName:
+            return "self.create_publisher(topic='{tname}',msg_type={ttype},qos_profile={qs})\n".format(tname=pubname, ttype=pubtype, qs=qsize)
+        else:
+            return "self.create_publisher(topic={tname},msg_type={ttype},qos_profile={qs})\n".format(tname=pubname, ttype=pubtype, qs=qsize)
+        
+    def ros_client_service_creation_command(self, srvname, srvtype, doStringName=True):
+        if doStringName:
+            return "self.create_client({srvtype}, '{srvname}', callback_group=MutuallyExclusiveCallbackGroup())\n".format(srvname=srvname, srvtype=srvtype)
+        else:
+            return "self.create_client({srvtype}, {srvname}, callback_group=MutuallyExclusiveCallbackGroup())\n".format(srvname=srvname, srvtype=srvtype)
+    
+            
+        
+class MonitorGenerator():
+    
+    
+    # initialising variable names for the class mostly 
+    def __init__(self):
+        
+        self.queue_size = 1000
+        self.mon_pubs_dict_name = 'self.monitor_publishers'
+        self.config_pubs_dict_name = 'self.config_publishers'
+        self.config_subs_dict_name = 'self.config_subscribers'
+        self.config_client_srvs_dict_name = 'self.config_client_services'
+        self.config_server_srvs_dict_name = 'self.config_server_services'
+        self.messages_dict_name = 'self.dict_msgs'
+        self.threading_loc_name = 'self.ws_lock'
+        self.websocket_name = 'self.ws'
+        self.logging_fname = 'self.logging'
+        self.message_received_fname_topic = 'self.on_message_topic'
+        self.message_received_fname_service_request = 'self.on_message_service_request'
+        self.message_received_fname_service_response = 'self.on_message_service_response'
+        self.monitor_id_vname = 'self.name'
+        self.mon_name_input = 'monitor_name'
+        self.log_name_input = 'log'
+        self.actions_name_input = 'actions'
+        self.actions_vname = 'self.actions'
+        self.log_name = 'self.logfn'
+        self.pub_topics_name = 'self.publish_topics'
+        self.publish_topics = None
+        self.topics_info = 'self.topics_info'
+        self.services_info = 'self.services_info'
+        self.codegenutils = CodeGenAndROSUtils()
+
+    # other helpful class related things 
+    def get_mon_class_name(self,monitor_id):
+        return "ROSMonitor_{0}".format(monitor_id)
+    
+    def create_class_header(self,monitor_id):
+        return "class {cn}(Node):\n".format(cn = self.get_mon_class_name(monitor_id))    
+
+    # things related to publishing and subscribing no function gen here 
+    
+    ''' get the message types for the topics '''
+    def get_topic_and_service_msg_types(self, topics_with_types_and_action):
+        tp_lists = {}
+        for topic_msg_details in topics_with_types_and_action:
+            package = topic_msg_details['type'][0:topic_msg_details['type'].rfind('.')]
+            type = topic_msg_details['type'][topic_msg_details['type'].rfind('.') + 1:]
+            topic = topic_msg_details['name']
+            tp_lists[topic] = {'package':package, 'type':type}
+        return tp_lists
+     
+    def get_subscribers(self, topics_with_types_and_action):
+        subscribers = {}
+        for tp_info in topics_with_types_and_action:
+            if 'publishers' in tp_info:
+                subscribers[tp_info['name']] = {'remapped':True, 'callback':True, 'republish':True}
+            elif 'subscribers' in tp_info:
+                subscribers[tp_info['name']] = {'remapped':False, 'callback':True, 'republish':True}
+            else:
+                subscribers[tp_info['name']] = {'remapped':False, 'callback':True, 'republish':False}
+        return subscribers
+
+    def get_services(self, services_with_types_and_action):
+        services = {}
+        for srv_info in services_with_types_and_action:
+            services[srv_info['name']] = {'remapped':True, 'callback':True, 'republish':True}
+        return services
+
+    def get_remapped_name(self, name):
+        return name + "_mon"
+
+    # functions that generate lines of code but not whole functions
+    
+    def create_subscriber_line(self,name,tinfo,tmsg_type,cbname):
+        tpname = name
+        subtype = tmsg_type['type']
+        if tinfo['remapped']:
+            tpname = self.get_remapped_name(name)
+        line = self.codegenutils.ros_subscriber_creation_command(tpname, subtype, cbname, self.queue_size)
+        return line
+    
+    def create_server_service_line(self,name,sinfo,smsg_type,cbname):
+        srvname = name
+        srvtype = smsg_type['type']
+        if sinfo['remapped']:
+            srvname = self.get_remapped_name(name)
+        line = self.codegenutils.ros_server_service_creation_command(srvname, srvtype, cbname)
+        return line
+    
+    # Old one
+    # def create_publisher_line(self, name, tinfo, tmsg_type):
+    #     if not tinfo['republish']:
+    #         return None
+    #     tpname = name 
+    #     if tinfo['remapped']:
+    #         # tpname = self.get_remapped_name(tpname)
+    #         pubtype = tmsg_type['type']
+    #         line = self.codegenutils.ros_publisher_creation_command(tpname, pubtype, self.queue_size)
+    #         return line
+    #     else:
+    #         return None
+    def create_publisher_line(self, name, tinfo, tmsg_type):
+        if not tinfo['republish']:
+            return None
+        tpname = name 
+        if not tinfo['remapped']:
+            tpname = self.get_remapped_name(tpname)
+        pubtype = tmsg_type['type']
+        line = self.codegenutils.ros_publisher_creation_command(tpname, pubtype, self.queue_size)
+        return line
+        
+    def create_client_service_line(self, name, srvinfo, srvmsg_type):
+        if not srvinfo['republish']:
+            return None
+        srvname = name 
+        if not srvinfo['remapped']:
+            srvname = self.get_remapped_name(srvname)
+        srvtype = srvmsg_type['type']
+        line = self.codegenutils.ros_client_service_creation_command(srvname, srvtype)
+        return line
+    
+    def create_config_subscriber_lines(self,subscribers,tp_lists,cbdict):
+        lines = []
+        for t in subscribers:
+            subline = self.create_subscriber_line(t, subscribers[t], tp_lists[t], 'self.'+cbdict[t]['name'])
+            line = "{config_sub_name}['{tname}']={subline}\n".format(config_sub_name=self.config_subs_dict_name, tname = t, subline=subline)
+            lines.append(line)
+            
+        return lines
+    
+    def create_config_server_service_lines(self,services,srv_lists,cbdict):
+        lines = []
+        for s in services:
+            srvline = self.create_server_service_line(s, services[s], srv_lists[s], 'self.'+cbdict[s]['name'])
+            line = "{config_srv_name}['{sname}']={srvline}\n".format(config_srv_name=self.config_server_srvs_dict_name, sname = s, srvline=srvline)
+            lines.append(line)
+            
+        return lines
+            
+            
+    def create_config_publishers(self,subscribers,tp_lists):
+        publishers={}
+        for topic in subscribers:
+            publishers[topic] = self.create_publisher_line(topic, subscribers[topic], tp_lists[topic])
+            
+        return publishers
+    
+    def create_config_publishers_lines(self,subscribers,tp_lists):
+        lines = []
+        for t in subscribers:
+            publine = self.create_publisher_line(t, subscribers[t], tp_lists[t])
+            if publine is not None:
+                line = "{config_pub_dname}['{tname}']={publine}\n".format(config_pub_dname=self.config_pubs_dict_name,tname=t,publine=publine)
+                lines.append(line)
+        if len(lines) == 0:
+            self.publish_topics = False
+        else:
+            self.publish_topics = True
+        return lines
+
+    def create_config_client_services_lines(self,services,srv_lists):
+        lines = []
+        for s in services:
+            srvline = "ServiceNode({srvtype},'{srvname}')".format(srvtype=srv_lists[s]['type'], srvname=s)
+            if srvline is not None:
+                line = "{config_srvs_dname}['{srvname}']={srvline}\n".format(config_srvs_dname=self.config_client_srvs_dict_name,srvname=s,srvline=srvline)
+                lines.append(line)
+                # line = "while not {config_srvs_dname}['{srvname}'].wait_for_service(timeout_sec=1.0): self.get_logger().info('service not available, waiting again...')\n".format(config_srvs_dname=self.config_client_srvs_dict_name,srvname=s)
+                # lines.append(line)
+        return lines
+    
+    def create_config_services_lines(self,subscribers,tp_lists):
+        lines = []
+        for t in subscribers:
+            publine = self.create_publisher_line(t, subscribers[t], tp_lists[t])
+            if publine is not None:
+                line = "{config_pub_dname}['{tname}']={publine}\n".format(config_pub_dname=self.config_pubs_dict_name,tname=t,publine=publine)
+                lines.append(line)
+        if len(lines) == 0:
+            self.publish_topics = False
+        else:
+            self.publish_topics = True
+        return lines
+
+        
+    def create_logging_func(self):
+        self.codegenutils.reset_indent("logging func start")
+        lineprefix = ''
+        input_var = 'json_dict'
+        header = "def {logfuncname}(self,{invar}):\n".format(logfuncname=self.logging_fname.replace("self.", ""),invar=input_var)
+        lines=[header]
+        
+        lineprefix = self.codegenutils.inc_indent(lineprefix)
+        line = "try:\n"
+        lines.append(lineprefix+line)
+        lineprefix = self.codegenutils.inc_indent(lineprefix)
+        line = "with open({logname},'a+') as log_file:\n".format(logname=self.log_name)
+        lines.append(lineprefix+line)
+        lineprefix = self.codegenutils.inc_indent(lineprefix)
+        line = "log_file.write(json.dumps({jd})+'\\n')\n".format(jd=input_var)
+        lines.append(lineprefix+line)
+        lineprefix = self.codegenutils.dec_indent(lineprefix)
+        msg = "'Event logged'"
+        line = self.codegenutils.get_ros_info_logging_line(msg)
+        lines.append(lineprefix+line)
+        lineprefix = self.codegenutils.dec_indent(lineprefix)
+        
+        
+        line="except:\n"
+        lines.append(lineprefix+line)
+        lineprefix = self.codegenutils.inc_indent(lineprefix)
+        msg = "'Unable to log the event'"
+        line = self.codegenutils.get_ros_info_logging_line(msg)
+        lines.append(lineprefix+line)
+        
+        lineprefix = self.codegenutils.dec_indent(lineprefix)
+        lineprefix = self.codegenutils.dec_indent(lineprefix)
+        
+        self.codegenutils.check_indent("logging func done")
+        return lines
+        
+
+    def create_on_message_topic(self,silent,oracle_action,tp_lists):
+        self.codegenutils.reset_indent("on message func start")
+        lineprefix =''
+        msg_input_var = 'message'
+        header ="def {onmsgfunc}(self,{msg_input}):\n".format(onmsgfunc = self.message_received_fname_topic.replace("self.",""),msg_input = msg_input_var)
+        lines=[header]
+        
+        lineprefix = self.codegenutils.inc_indent(lineprefix)
+        jsondict = 'json_dict'
+        line = "{jd} = json.loads({invar})\n".format(jd=jsondict,invar=msg_input_var)
+        lines.append(lineprefix+line)
+        line = "verdict = str({jd}['verdict'])\n".format(jd=jsondict)
+        lines.append(lineprefix+line)
+        line = "if verdict == 'true' or verdict == 'currently_true' or verdict == 'unknown':\n"
+        lines.append(lineprefix+line)
+        
+        lineprefix = self.codegenutils.inc_indent(lineprefix)
+        
+        line = "if verdict == 'true' and not {pt_var}:\n".format(pt_var=self.pub_topics_name)
+        lines.append(lineprefix+line)
+        lineprefix=self.codegenutils.inc_indent(lineprefix)
+        msg = "'The monitor concluded the satisfaction of the property under analysis and can be safely removed.'"
+        line = self.codegenutils.get_ros_info_logging_line(msg)
+        lines.append(lineprefix+line)
+        line = "{ws}.close()\n".format(ws=self.websocket_name)
+        lines.append(lineprefix+line)
+        line = "exit(0)\n"
+        lines.append(lineprefix+line)
+        
+        lineprefix = self.codegenutils.dec_indent(lineprefix)
+        line = "else:\n"
+        lines.append(lineprefix+line)
+        lineprefix = self.codegenutils.inc_indent(lineprefix)
+        line = "{logging_fname}({data_dname})\n".format(logging_fname=self.logging_fname, data_dname=jsondict)
+        lines.append(lineprefix+line)
+        line = "topic = {jsondict}['topic']\n".format(jsondict=jsondict)
+        lines.append(lineprefix+line)
+        
+        if not silent:
+            msg = "'The event '+{data}+' is consistent and republished'".format(data = msg_input_var)
+            line = self.codegenutils.get_ros_info_logging_line(msg)
+            lines.append(lineprefix+line)
         if oracle_action == 'nothing':
-            imports += '''\ndict_msgs = {}'''
-    # write the imports for the msg types used by the monitor (extracted by the previous instrumentation)
-        msg_type_imports = ''
-        msg_import_set = set()
-        for topic_with_types_and_action in topics_with_types_and_action:
-            package = topic_with_types_and_action['type'][0:topic_with_types_and_action['type'].rfind('.')]
-            type = topic_with_types_and_action['type'][topic_with_types_and_action['type'].rfind('.')+1:]
-            msg_import_set.update([(package, type)])
-        for (package, type) in msg_import_set:
-            msg_type_imports += '''\nfrom {p} import {t}'''.format(p = package, t = type)
-    # write the creation of the publisher for each topic (and the callback function for the instrumented one)
-        pub_with_callbacks = '\n'
-        for topic_with_types_and_action in topics_with_types_and_action:
-            if 'publishers' in topic_with_types_and_action or 'subscribers' in topic_with_types_and_action:
-                if 'subscribers' in topic_with_types_and_action:
-                    tp_side = topic_with_types_and_action['name'] + '_mon'
-                else:
-                    tp_side = topic_with_types_and_action['name']
-                pub_with_callbacks += '''\npub{tp} = rospy.Publisher(name = '{tps}', data_class = {ty}, latch = True, queue_size = 1000)'''.format(tp = topic_with_types_and_action['name'].replace('/','_'), tps = tp_side, ty = topic_with_types_and_action['type'][topic_with_types_and_action['type'].rfind('.')+1:])
-            pub_with_callbacks += '''\ndef callback{tp}(data):\n\tglobal ws, ws_lock'''.format(tp = topic_with_types_and_action['name'].replace('/','_'))
-            if not silent:
-                pub_with_callbacks += '''\n\trospy.loginfo('monitor has observed: ' + str(data))'''
-            pub_with_callbacks += '''\n\tdict = message_converter.convert_ros_message_to_dictionary(data)\n\tdict['topic'] = '{tp}'\n\tdict['time'] = rospy.get_time()\n\tws_lock.acquire()'''.format(tp = topic_with_types_and_action['name'])
-
-            if oracle_action == 'nothing':
-                pub_with_callbacks += '''\n\twhile dict['time'] in dict_msgs:\n\t\tdict['time'] += 0.01'''
-            if url != None and port != None:
-                pub_with_callbacks += '''\n\tws.send(json.dumps(dict))'''
-                if oracle_action == 'nothing':
-                    pub_with_callbacks += '''\n\tdict_msgs[dict['time']] = data'''
-                pub_with_callbacks += '''\n\tws_lock.release()'''
-                if not silent:
-                    pub_with_callbacks += '''\n\trospy.loginfo('event propagated to oracle')'''
-            else:
-                pub_with_callbacks += '''\n\tlogging(dict)'''
-                pub_with_callbacks += '''\n\tws_lock.release()'''
-                if not silent:
-                    pub_with_callbacks += '''\n\trospy.loginfo('event has been successfully logged')'''
-                if 'publishers' in topic_with_types_and_action or 'subscribers' in topic_with_types_and_action:
-                    pub_with_callbacks += '''\n\tpub_dict['{tp}'].publish(data)'''.format(tp = topic_with_types_and_action['name'])
-    # write the dictionary for dynamically keeping track of the publishers
-        pub_dict = '''\npub_dict = {'''
-        first_time = True
-        for topic_with_types_and_action in topics_with_types_and_action:
-        #for (topic, (type, _), _, _, _, _, _) in topics_with_types:
-            if 'publishers' in topic_with_types_and_action or 'subscribers' in topic_with_types_and_action:
-                if(first_time):
-                    first_time = False
-                else:
-                    pub_dict += ', '
-                pub_dict += ''' '{tp1}' : pub{tp2}'''.format(tp1 = topic_with_types_and_action['name'], tp2 = topic_with_types_and_action['name'].replace('/','_'))
-        pub_dict += '''}'''
-        first_time = True
-    # write the dictionary for dynamically keeping track of the message types (we need it for the message converter)
-        msg_dict = '''\nmsg_dict = {'''
-        for topic_with_types_and_action in topics_with_types_and_action:
-        #for (topic, (type, imp), _, _, _, _, _) in topics_with_types:
-            if(first_time):
-                first_time = False
-            else:
-                msg_dict += ', '
-            msg_dict += ''' '{tp}' : "{ty}"'''.format(tp = topic_with_types_and_action['name'], ty = topic_with_types_and_action['type'][0:topic_with_types_and_action['type'].rfind('.')].replace('.msg', '') + '/' + topic_with_types_and_action['type'][topic_with_types_and_action['type'].rfind('.')+1:])
-        msg_dict += '''}'''
-    # write the definition of the monitor function which will be used to initialize the rosnode, and create the Subscribers for all the instrumented topics.
-    # In short, the monitor observes the instrumented topics generated by the real nodes, and then it publishes (propagates) them
-    # to the usual Subscribers
-        monitor_def = '''\ndef monitor():\n\tglobal pub_error, pub_verdict\n\twith open(log, 'w') as log_file:'''
-        monitor_def += '''\n\t\tlog_file.write('')\n\trospy.init_node('{id}', anonymous=True)'''.format(id = monitor_id)
-        monitor_def += '''\n\tpub_error = rospy.Publisher(name = '{id}/monitor_error', data_class = MonitorError, latch = True, queue_size = 1000)\n\tpub_verdict = rospy.Publisher(name = '{id}/monitor_verdict', data_class = String, latch = True, queue_size = 1000)'''.format(id = monitor_id)
-        for topic_with_types_and_action in topics_with_types_and_action:
-            if 'subscribers' in topic_with_types_and_action:
-                tp_side = topic_with_types_and_action['name']
-            elif 'publishers' in topic_with_types_and_action:
-                tp_side = topic_with_types_and_action['name'] + '_mon'
-            else:
-                tp_side = topic_with_types_and_action['name']
-            monitor_def += '''\n\trospy.Subscriber('{tps}', {ty}, callback{tp})'''.format(tp = topic_with_types_and_action['name'].replace('/','_'), tps = tp_side, ty = topic_with_types_and_action['type'][topic_with_types_and_action['type'].rfind('.')+1:])
-        if not silent:
-            monitor_def += '''\n\trospy.loginfo('monitor started and ready')'''
-    # write the auxiliary callbacks functions called by the websocket used by the monitor
-    # when a topic is observed by the monitor, if we are doing online RV, it propagates the topic to the
-    # oracle. The oracle checks the event and returns the outcome to the monitor
-    # the monitor then propagates the event to the other nodes (unless we decided to filter the errors,
-    # in that case the monitor does not propagate the event)
-        if url != None and port != None:
-            other_callbacks = '''\ndef on_message(ws, message):\n\tglobal error, log, actions\n\tjson_dict = json.loads(message)'''
-            other_callbacks+= '''\n\tif json_dict['verdict'] == 'true' or json_dict['verdict'] == 'currently_true' or json_dict['verdict'] == 'unknown':'''
-            other_callbacks+= '''\n\t\tif json_dict['verdict'] == 'true' and not pub_dict:\n\t\t\trospy.loginfo('The monitor concluded the satisfaction of the property under analysis, and can be safely removed.')'''
-            other_callbacks+= '''\n\t\t\tws.close()\n\t\t\texit(0)'''
-            other_callbacks+= '''\n\t\telse:\n\t\t\tlogging(json_dict)\n\t\t\ttopic = json_dict['topic']'''
-            if not silent:
-                other_callbacks += '''\n\t\t\trospy.loginfo('The event ' + message + ' is consistent and republished')'''
-            if oracle_action == 'nothing':
-                other_callbacks += '''\n\t\t\tif topic in pub_dict:\n\t\t\t\tpub_dict[topic].publish(dict_msgs[json_dict['time']])\n\t\t\tdel dict_msgs[json_dict['time']]'''
-            else:
-                other_callbacks += '''\n\t\t\tdel json_dict['topic']\n\t\t\tdel json_dict['time']\n\t\t\tROS_message = message_converter.convert_dictionary_to_ros_message(msg_dict[topic], json_dict)'''
-                other_callbacks += '''\n\t\t\t if topic in pub_dict:\n\t\t\t\tpub_dict[topic].publish(ROS_message)'''
-            other_callbacks += '''\n\telse:\n\t\tlogging(json_dict)\n\t\t#if (json_dict['verdict'] == 'false' and actions[json_dict['topic']][1] >= 1) or (json_dict['verdict'] == 'currently_false' and actions[json_dict['topic']][1] == 1):'''
-
-            if not silent:
-                other_callbacks += '''\n\t\trospy.loginfo('The event ' + message + ' is inconsistent..')'''
-            other_callbacks += '''\n\t\terror = MonitorError()\n\t\terror.topic = json_dict['topic']\n\t\terror.time = json_dict['time']\n\t\terror.property = json_dict['spec']'''
-            if oracle_action == 'nothing':
-                other_callbacks += '''\n\t\terror.content = str(dict_msgs[json_dict['time']])'''
-            else:
-                other_callbacks += '''\n\t\tjson_dict_copy = json_dict.copy()\n\t\tdel json_dict_copy['topic']\n\t\tdel json_dict_copy['time']'''
-                other_callbacks+='''\n\t\tdel json_dict_copy['spec']\n\t\tdel json_dict_copy['error']\n\t\terror.content = json.dumps(json_dict_copy)'''
-            other_callbacks += '''\n\t\tpub_error.publish(error)\n\t\tif json_dict['verdict'] == 'false' and not pub_dict:'''
-            other_callbacks += '''\n\t\t\trospy.loginfo('The monitor concluded the violation of the property under analysis, and can be safely removed.')\n\t\t\tws.close()'''
-            other_callbacks += '''\n\t\t\texit(0)'''
-            other_callbacks +='''\n\t\tif actions[json_dict['topic']][0] != 'filter':'''
-            other_callbacks +='''\n\t\t\t#if json_dict['verdict'] == 'currently_false':\n\t\t\t#rospy.loginfo('The event ' + message + ' is consistent ')'''
-            other_callbacks +='''\n\t\t\ttopic = json_dict['topic']'''
-            if oracle_action == 'nothing':
-                other_callbacks += '''\n\t\t\tif topic in pub_dict:\n\t\t\t\tpub_dict[topic].publish(dict_msgs[json_dict['time']])'''
-                other_callbacks += '''\n\t\t\tdel dict_msgs[json_dict['time']]'''
-            else:
-                other_callbacks += '''\n\t\t\tdel json_dict['topic']\n\t\t\tdel json_dict['time']'''
-                other_callbacks +='''\n\t\t\tdel json_dict['error']\n\t\t\tdel json_dict['spec']'''
-                other_callbacks +='''\n\t\t\tROS_message = message_converter.convert_dictionary_to_ros_message(msg_dict[topic], json_dict)'''
-                other_callbacks +='''\n\t\t\tif topic in pub_dict:\n\t\t\t\tpub_dict[topic].publish(ROS_message)'''
-            other_callbacks += '''\n\t\terror = True'''
-            other_callbacks += '''\n\tpub_verdict.publish(json_dict['verdict'])'''
-            other_callbacks += '''\n\ndef on_error(ws, error):\n\trospy.loginfo(error)'''
-            other_callbacks += '''\n\ndef on_close(ws):\n\trospy.loginfo('### websocket closed ###')'''
-            other_callbacks += '''\n\ndef on_open(ws):\n\trospy.loginfo('### websocket is open ###')'''
+            line = "if topic in {pubdict}:\n".format(pubdict=self.config_pubs_dict_name)
+            lines.append(lineprefix+line)
+            lineprefix = self.codegenutils.inc_indent(lineprefix)
+            line = "{pubdict}[topic].publish({msgdict}[{jsond}['time']])\n".format(pubdict=self.config_pubs_dict_name,msgdict=self.messages_dict_name,jsond=jsondict)
+            lines.append(lineprefix+line)
+            lineprefix = self.codegenutils.dec_indent(lineprefix)
+            line = "del {msgdict}[{jsond}['time']]\n".format(msgdict=self.messages_dict_name,jsond=jsondict)
+            lines.append(lineprefix+line)
+            lineprefix = self.codegenutils.dec_indent(lineprefix)
         else:
-            other_callbacks = ''
-        other_callbacks += '''\n\ndef logging(json_dict):\n\ttry:\n\t\twith open(log, 'a+') as log_file:\n\t\t\tlog_file.write(json.dumps(json_dict) + '\\n')'''
+            # lineprefix = self.codegenutils.inc_indent(lineprefix)
+            line = "del {jsond}['topic']\n".format(jsond=jsondict)
+            lines.append(lineprefix+line)
+            line = "del {jsond}['time']\n".format(jsond=jsondict)
+            lines.append(lineprefix+line)
+            line = "if 'verdict' in {jsond}: del {jsond}['verdict']\n".format(jsond=jsondict)
+            lines.append(lineprefix+line)
+            line = "ROS_message = eval(''+{topicsinfo}[topic]['type']+'()')\n".format(topicsinfo=self.topics_info)
+            lines.append(lineprefix+line)
+            line = "rosidl_runtime_py.set_message_fields(ROS_message,{jsond})\n".format(jsond=jsondict)
+            lines.append(lineprefix+line)
+           
+            line = "if topic in {pubdict}:\n".format(pubdict=self.config_pubs_dict_name)
+            lines.append(lineprefix+line)
+            lineprefix = self.codegenutils.inc_indent(lineprefix)
+            line = "{pubdict}[topic].publish(ROS_message)\n".format(pubdict=self.config_pubs_dict_name)
+            lines.append(lineprefix+line)
+            lineprefix=self.codegenutils.dec_indent(lineprefix)
+            lineprefix=self.codegenutils.dec_indent(lineprefix)
+        
+        lineprefix = self.codegenutils.dec_indent(lineprefix)
+        
+        # in the else for the first if 
+        line = "else:\n"
+        lines.append(lineprefix+line)
+        lineprefix = self.codegenutils.inc_indent(lineprefix)
+        
+        # if the verdict is not ture or unknown 
+        line = "{logfunc}({jsond})\n".format(logfunc=self.logging_fname,jsond=jsondict)
+        lines.append(lineprefix+line)
+        
         if not silent:
-            other_callbacks += '''\n\t\trospy.loginfo('event logged')'''
-        other_callbacks += '''\n\texcept:\n\t\trospy.loginfo('Unable to log the event.')'''
-        other_callbacks +='''\n\ndef main(argv):\n\tglobal log, actions, ws\n\tlog = '{l}' '''.format(l = log)
-        other_callbacks += '''\n\tactions = {'''
-        first_time = True
-        for topic_with_types_and_action in topics_with_types_and_action:
-            # if 'warning' in topic_with_types_and_action:
-            #     warning = topic_with_types_and_action['warning']
-            # else:
-            #     warning = 0
-            if(first_time):
-                first_time = False
-            else:
-                other_callbacks += ', '
-            other_callbacks += '''\n\t\t'{tp}' : ('{act}', {w})'''.format(tp = topic_with_types_and_action['name'], act = topic_with_types_and_action['action'], w = warning)
-        if url != None and port != None:
-            other_callbacks += '''\n\t}\n\tmonitor()\n\twebsocket.enableTrace(False)'''
-            other_callbacks += '''\n\tws = websocket.WebSocketApp(\n\t\t'ws://{u}:{p}',\n\t\ton_message = on_message,
-            \n\t\ton_error = on_error,\n\t\ton_close = on_close,\n\t\ton_open = on_open)\n\tws.run_forever()'''.format(u = url, p = port)
+            msg = "'The event' + {msg} + ' is inconsistent' ".format(msg=msg_input_var)
+            line = self.codegenutils.get_ros_info_logging_line(msg)
+            lines.append(lineprefix+line)
+        
+        manylines = ["error = MonitorError()\n",
+                     "error.m_topic = {0}['topic']\n".format(jsondict),
+                     "error.m_time = {0}['time']\n".format(jsondict),
+                     "error.m_property = {0}['spec']\n".format(jsondict),
+                     ]
+        lines=self.codegenutils.append_lines_to_list_with_prefix(lines, manylines, lineprefix)
+        
+        if oracle_action == 'nothing':
+            line = "error.m_content = str({dmsgs}[{jsond}['time']])\n".format(dmsgs=self.messages_dict_name,jsond=jsondict)
+            lines.append(lineprefix+line)
         else:
-            other_callbacks += '''\n\t}\n\tmonitor()\n\trospy.spin()'''
-        other_callbacks += '''\n\nif __name__ == '__main__':\n\tmain(sys.argv)'''
-        monitor.write(imports + msg_type_imports + pub_with_callbacks + pub_dict + msg_dict + monitor_def + other_callbacks)
+            manylines = ["{jsond}_copy = {jsond}.copy()\n".format(jsond=jsondict),
+                         "del {jsond}_copy['topic']\n".format(jsond=jsondict),
+                         "del {jsond}_copy['time']\n".format(jsond=jsondict),
+                         "del {jsond}_copy['spec']\n".format(jsond=jsondict),
+                         
+                         # "del {jsond}_copy['error']\n".format(jsond=jsondict),
+                         "error.m_content = json.dumps({jsond}_copy)\n".format(jsond=jsondict)
+                         ]
+            lines = self.codegenutils.append_lines_to_list_with_prefix(lines, manylines, lineprefix)
+        line = "{monpubs}['error'].publish(error)\n".format(monpubs=self.mon_pubs_dict_name)
+        lines.append(lineprefix+line)
+        line = "if verdict == 'false' and not {pt_var}:\n".format(pt_var=self.pub_topics_name)
+        lines.append(lineprefix+line)
+        lineprefix = self.codegenutils.inc_indent(lineprefix)
+        
+        msg = "'The monitor concluded the violation of the property under analysis and can be safely removed.'"
+        line = self.codegenutils.get_ros_info_logging_line(msg)
+        lines.append(lineprefix+line)
+        line = "{ws}.close()\n".format(ws=self.websocket_name)
+        lines.append(lineprefix+line)
+        line = "exit(0)\n"
+        lines.append(lineprefix+line)
+        
+        lineprefix = self.codegenutils.dec_indent(lineprefix)
+        line = "if {actions}[{jsond}['topic']][0] != 'filter':\n".format(actions=self.actions_vname,jsond=jsondict)
+        lines.append(lineprefix+line)
+        lineprefix = self.codegenutils.inc_indent(lineprefix)
+        line = "topic = {jsond}['topic']\n".format(jsond=jsondict)
+        lines.append(lineprefix+line)
+        
+        if oracle_action == 'nothing':
+            line = "if topic in {pubd}:\n".format(pubd=self.config_pubs_dict_name)
+            lines.append(lineprefix+line)
+            lineprefix = self.codegenutils.inc_indent(lineprefix)
+            line = "{pubd}[topic].publish({dmsgs}[{jsond}['time']])\n".format(pubd=self.config_pubs_dict_name, dmsgs=self.messages_dict_name,jsond=jsondict)
+            lines.append(lineprefix+line)
+            lineprefix = self.codegenutils.dec_indent(lineprefix)
+            line = "del {dmsgs}[{jsond}['time']]\n".format( dmsgs=self.messages_dict_name,jsond=jsondict)
+            lines.append(lineprefix+line)
+            
+            
+        else:
+            manylines = [   "del {jsond}['topic']\n".format(jsond=jsondict),
+                         "del {jsond}['time']\n".format(jsond=jsondict),
+                         "del {jsond}['spec']\n".format(jsond=jsondict),
+                         "if 'verdict' in {jsond}: del {jsond}['verdict']\n".format(jsond=jsondict)
+                         # "del {jsond}['error']\n".format(jsond=jsondict)
+                ]
+            lines=self.codegenutils.append_lines_to_list_with_prefix(lines, manylines, lineprefix)
+            
+            line = "ROS_message = eval(''+{topicsinfo}[topic]['type']+'()')\n".format(topicsinfo=self.topics_info)
+            lines.append(lineprefix+line)
+            line = "rosidl_runtime_py.set_message_fields(ROS_message,{jsond})\n".format(jsond=jsondict)
+            lines.append(lineprefix+line)
+           
+            line = "if topic in {pubdict}:\n".format(pubdict=self.config_pubs_dict_name)
+            lines.append(lineprefix+line)
+            lineprefix = self.codegenutils.inc_indent(lineprefix)
+            line = "{pubdict}[topic].publish(ROS_message)\n".format(pubdict=self.config_pubs_dict_name)
+            lines.append(lineprefix+line)
+            lineprefix = self.codegenutils.dec_indent(lineprefix)
+            
+        lineprefix = self.codegenutils.dec_indent(lineprefix)
+            
+        line="error=True\n"
+        lines.append(lineprefix+line)   
+        lineprefix = self.codegenutils.dec_indent(lineprefix)
+        line = "verdict_msg = String()\n"
+        lines.append(lineprefix+line)
+        line = "verdict_msg.data = verdict\n"
+        lines.append(lineprefix+line)
+        line = "{monpubs}['verdict'].publish(verdict_msg)\n".format(monpubs=self.mon_pubs_dict_name)
+        lines.append(lineprefix+line)
+        
+        self.codegenutils.check_indent("on message func done")    
+        return lines
+    
+    def create_on_message_service_request(self,silent,oracle_action,srv_lists,do_oracle):
+        self.codegenutils.reset_indent("on message func start")
+        lineprefix =''
+        msg_input_var = 'message'
+        header ="def {onmsgfunc}(self,{msg_input}):\n".format(onmsgfunc = self.message_received_fname_service_request.replace("self.",""),msg_input = msg_input_var)
+        lines=[header]
+        
+        lineprefix = self.codegenutils.inc_indent(lineprefix)
+        # line = "if {msg_input} is not None:\n".format(msg_input=msg_input_var)
+        # lines.append(lineprefix+line)
+        # lineprefix = self.codegenutils.inc_indent(lineprefix)
+        jsondict = 'json_dict'
+        line = "{jd} = json.loads({invar})\n".format(jd=jsondict,invar=msg_input_var)
+        lines.append(lineprefix+line)
+        line = "verdict = str({jd}['verdict'])\n".format(jd=jsondict)
+        lines.append(lineprefix+line)
+        line = "service = {jsondict}['service'] = {jsondict}['service'].replace('_mon', '')\n".format(jsondict=jsondict)
+        lines.append(lineprefix+line)
+        line = "verdict_msg = String()\n"
+        lines.append(lineprefix+line)
+        line = "verdict_msg.data = verdict\n"
+        lines.append(lineprefix+line)
+        line = "{monpubs}['verdict'].publish(verdict_msg)\n".format(monpubs=self.mon_pubs_dict_name)
+        lines.append(lineprefix+line)
+        line = "if verdict == 'true' or verdict == 'currently_true' or verdict == 'unknown':\n"
+        lines.append(lineprefix+line)
+        
+        lineprefix = self.codegenutils.inc_indent(lineprefix)
+        # if not do_oracle:
+        line = "del {data_dname}['verdict']\n".format(data_dname=jsondict)
+        lines.append(lineprefix + line)
 
-def create_launch_file(monitor_ids):
-    with open('../monitor/run.launch', 'w') as launch_file:
-        str = '''
-<launch>
-        '''
+        line = "{logging_fname}({data_dname})\n".format(logging_fname=self.logging_fname, data_dname=jsondict)
+        lines.append(lineprefix+line)
+        
+        if not silent:
+            msg = "'The request '+{data}+' is consistent, the service is called'".format(data = msg_input_var)
+            line = self.codegenutils.get_ros_info_logging_line(msg)
+            lines.append(lineprefix+line)
+    
+        line = "if service in {srvdict}:\n".format(srvdict=self.config_client_srvs_dict_name)
+        lines.append(lineprefix+line)
+        lineprefix = self.codegenutils.inc_indent(lineprefix)
+        line = "res = {srvdict}[service].call_service({msgdict}[{jsond}['time']])\n".format(srvdict=self.config_client_srvs_dict_name,msgdict=self.messages_dict_name,jsond=jsondict)
+        lines.append(lineprefix + line)
+        # line = "rclpy.spin_until_future_complete(self, res)\n"
+        # lines.append(lineprefix + line)
+        # line = "res = res.result()\n"
+        # lines.append(lineprefix + line)
+        line = "{jsond}['response'] = rosidl_runtime_py.message_to_ordereddict(res)\n".format(jsond=jsondict)
+        lines.append(lineprefix + line)
+        line = "{msgdict}[{jsond}['time']] = {input_varname}\n".format(msgdict=self.messages_dict_name, jsond=jsondict, input_varname='res')
+        lines.append(lineprefix+line)
+        lineprefix = self.codegenutils.dec_indent(lineprefix)
+        # We do not consider the Oracle's modification in case of services (maybe in the future)
+        # else:
+        #     # lineprefix = self.codegenutils.inc_indent(lineprefix)
+        #     line = "del {jsond}['service']\n".format(jsond=jsondict)
+        #     lines.append(lineprefix+line)
+        #     line = "del {jsond}['time']\n".format(jsond=jsondict)
+        #     lines.append(lineprefix+line)
+        #     line = "if 'verdict' in {jsond}: del {jsond}['verdict']\n".format(jsond=jsondict)
+        #     lines.append(lineprefix+line)
+        #     line = "ROS_message = eval(''+{servicesinfo}[service]['type']+'()')\n".format(servicesinfo=self.services_info)
+        #     lines.append(lineprefix+line)
+        #     line = "rosidl_runtime_py.set_message_fields(ROS_message,{jsond}['request'])\n".format(jsond=jsondict)
+        #     lines.append(lineprefix+line)
+        #     line = "if service in {srvdict}:\n".format(srvdict=self.config_srv_dict_name)
+        #     lines.append(lineprefix+line)
+        #     lineprefix = self.codegenutils.inc_indent(lineprefix)
+        #     line = "res = {srvdict}[service].call({msgdict}[{jsond}['time']])\n".format(srvdict=self.config_client_srvs_dict_name,msgdict=self.messages_dict_name,jsond=jsondict)
+        #     lines.append(lineprefix+line)
+        #     lineprefix=self.codegenutils.dec_indent(lineprefix)
+        #     lineprefix=self.codegenutils.dec_indent(lineprefix)
+
+        oracle_response_varname = 'msg'
+        # line = "if 'verdict' in {jsond}: del {jsond}['verdict']\n".format(jsond=jsondict)
+        # lines.append(lineprefix+line)
+        line = "del {jsond}['request']\n".format(jsond=jsondict)
+        lines.append(lineprefix+line)
+        # line = "{jsond}['response']=True\n".format(jsond=jsondict)
+        # lines.append(lineprefix+line)
+        if do_oracle:
+            line = "{ws_lock}.acquire()\n".format(ws_lock=self.threading_loc_name)
+            lines.append(lineprefix + line)
+            line = "{ws}.send(json.dumps({data_dname}))\n".format(ws=self.websocket_name, data_dname=jsondict)
+            lines.append(lineprefix + line)
+            line = "{msg}={ws}.recv()\n".format(msg=oracle_response_varname, ws=self.websocket_name)
+            lines.append(lineprefix + line)
+            line = "{ws_lock}.release()\n".format(ws_lock=self.threading_loc_name)
+            lines.append(lineprefix + line)
+        else:
+            line = "{data_dname}['verdict']='currently_true'\n".format(data_dname=jsondict)
+            lines.append(lineprefix + line)
+            line = "{msg}=json.dumps({data_dname})\n".format(msg=oracle_response_varname, data_dname=jsondict)
+            lines.append(lineprefix + line)
+        line = "return {msg_fname}({msg_vname})\n".format(msg_fname=self.message_received_fname_service_response, msg_vname=oracle_response_varname)
+        lines.append(lineprefix + line)
+        
+        lineprefix = self.codegenutils.dec_indent(lineprefix)
+        
+        # in the else for the first if 
+        line = "else:\n"
+        lines.append(lineprefix+line)
+        lineprefix = self.codegenutils.inc_indent(lineprefix)
+        
+        # if the verdict is not true or unknown 
+        line = "{logfunc}({jsond})\n".format(logfunc=self.logging_fname,jsond=jsondict)
+        lines.append(lineprefix+line)
+        
+        if not silent:
+            msg = "'The event request' + {msg} + ' is inconsistent' ".format(msg=msg_input_var)
+            line = self.codegenutils.get_ros_info_logging_line(msg)
+            lines.append(lineprefix+line)
+        
+        manylines = ["error = MonitorError()\n",
+                     "error.m_service = {0}['service'].replace('_mon', '')\n".format(jsondict),
+                     "error.m_time = {0}['time']\n".format(jsondict),
+                     "error.m_property = {0}['spec']\n".format(jsondict),
+                     ]
+        lines=self.codegenutils.append_lines_to_list_with_prefix(lines, manylines, lineprefix)
+        
+        if oracle_action == 'nothing':
+            line = "error.m_content = str({dmsgs}[{jsond}['time']])\n".format(dmsgs=self.messages_dict_name,jsond=jsondict)
+            lines.append(lineprefix+line)
+        # else:
+        #     manylines = ["{jsond}_copy = {jsond}.copy()\n".format(jsond=jsondict),
+        #                  "del {jsond}_copy['service']\n".format(jsond=jsondict),
+        #                  "del {jsond}_copy['time']\n".format(jsond=jsondict),
+        #                  "del {jsond}_copy['spec']\n".format(jsond=jsondict),
+                         
+        #                  # "del {jsond}_copy['error']\n".format(jsond=jsondict),
+        #                  "error.m_content = json.dumps({jsond}_copy)\n".format(jsond=jsondict)
+        #                  ]
+        #     lines = self.codegenutils.append_lines_to_list_with_prefix(lines, manylines, lineprefix)
+        line = "{monpubs}['error'].publish(error)\n".format(monpubs=self.mon_pubs_dict_name)
+        lines.append(lineprefix+line)
+
+        line="error=True\n"
+        lines.append(lineprefix+line)   
+        lineprefix = self.codegenutils.dec_indent(lineprefix)
+
+        line = "if {actions}[{jsond}['service']][0] != 'filter':\n".format(actions=self.actions_vname,jsond=jsondict)
+        lines.append(lineprefix+line)
+        lineprefix = self.codegenutils.inc_indent(lineprefix)
+        line = "service = {jsond}['service'] = {jsond}['service'].replace('_mon', '')\n".format(jsond=jsondict)
+        lines.append(lineprefix+line)
+    
+        line = "if service in {srvdict}:\n".format(srvdict=self.config_client_srvs_dict_name)
+        lines.append(lineprefix+line)
+        lineprefix = self.codegenutils.inc_indent(lineprefix)
+        line = "res = {srvdict}[service].call_service({msgdict}[{jsond}['time']])\n".format(srvdict=self.config_client_srvs_dict_name,msgdict=self.messages_dict_name,jsond=jsondict)
+        lines.append(lineprefix + line)
+        # line = "rclpy.spin_until_future_complete(self, res)\n"
+        # lines.append(lineprefix + line)
+        # line = "res = res.result()\n"
+        # lines.append(lineprefix + line)
+        line = "{msgdict}[{jsond}['time']] = {input_varname}\n".format(msgdict=self.messages_dict_name, jsond=jsondict, input_varname='res')
+        lines.append(lineprefix+line)
+        line = "{jsond}['response'] = rosidl_runtime_py.message_to_ordereddict(res)\n".format(jsond=jsondict)
+        lines.append(lineprefix + line)
+        lineprefix = self.codegenutils.dec_indent(lineprefix)
+    
+        oracle_response_varname = 'msg'
+        line = "if 'verdict' in {jsond}: del {jsond}['verdict']\n".format(jsond=jsondict)
+        lines.append(lineprefix+line)
+        line = "del {jsond}['request']\n".format(jsond=jsondict)
+        lines.append(lineprefix+line)
+        # line = "{jsond}['response'] = True\n".format(jsond=jsondict)
+        # lines.append(lineprefix+line)
+        if do_oracle:
+            line = "{ws_lock}.acquire()\n".format(ws_lock=self.threading_loc_name)
+            lines.append(lineprefix + line)
+            line = "{ws}.send(json.dumps({data_dname}))\n".format(ws=self.websocket_name, data_dname=jsondict)
+            lines.append(lineprefix + line)
+            line = "{msg}={ws}.recv()\n".format(msg=oracle_response_varname, ws=self.websocket_name)
+            lines.append(lineprefix + line)
+            line = "{ws_lock}.release()\n".format(ws_lock=self.threading_loc_name)
+            lines.append(lineprefix + line)
+        else:
+            line = "{data_dname}['verdict']='currently_true'\n".format(data_dname=jsondict)
+            lines.append(lineprefix + line)
+            line = "{msg}=json.dumps({data_dname})\n".format(msg=oracle_response_varname, data_dname=jsondict)
+            lines.append(lineprefix + line)
+        line = "return {msg_fname}({msg_vname})\n".format(msg_fname=self.message_received_fname_service_response, msg_vname=oracle_response_varname)
+        lines.append(lineprefix + line)
+            
+        lineprefix = self.codegenutils.dec_indent(lineprefix)
+        line = "else:\n"
+        lines.append(lineprefix + line)
+        lineprefix = self.codegenutils.inc_indent(lineprefix)
+        line = "raise Exception('The request violates the monitor specification, so it has been filtered out.')\n\n"
+        lines.append(lineprefix + line)
+        lineprefix = self.codegenutils.dec_indent(lineprefix)
+        
+        self.codegenutils.check_indent("on message func done")    
+        return lines
+    
+    def create_on_message_service_response(self,silent,oracle_action,srv_lists,do_oracle):
+        self.codegenutils.reset_indent("on message func start")
+        lineprefix =''
+        msg_input_var = 'message'
+        header ="def {onmsgfunc}(self,{msg_input}):\n".format(onmsgfunc = self.message_received_fname_service_response.replace("self.",""),msg_input = msg_input_var)
+        lines=[header]
+        
+        lineprefix = self.codegenutils.inc_indent(lineprefix)
+        jsondict = 'json_dict'
+        line = "{jd} = json.loads({invar})\n".format(jd=jsondict,invar=msg_input_var)
+        lines.append(lineprefix+line)
+        line = "verdict = str({jd}['verdict'])\n".format(jd=jsondict)
+        lines.append(lineprefix+line)
+        line = "service = {jsondict}['service'] = {jsondict}['service'].replace('_mon', '')\n".format(jsondict=jsondict)
+        lines.append(lineprefix+line)
+        line = "verdict_msg = String()\n"
+        lines.append(lineprefix+line)
+        line = "verdict_msg.data = verdict\n"
+        lines.append(lineprefix+line)
+        line = "{monpubs}['verdict'].publish(verdict_msg)\n".format(monpubs=self.mon_pubs_dict_name)
+        lines.append(lineprefix+line)
+        line = "if verdict == 'true' or verdict == 'currently_true' or verdict == 'unknown':\n"
+        lines.append(lineprefix+line)
+        
+        lineprefix = self.codegenutils.inc_indent(lineprefix)
+        if not do_oracle:
+            line = "del {data_dname}['verdict']\n".format(data_dname=jsondict)
+            lines.append(lineprefix + line)
+        line = "{logging_fname}({data_dname})\n".format(logging_fname=self.logging_fname, data_dname=jsondict)
+        lines.append(lineprefix+line)
+        
+        if not silent:
+            msg = "'The response '+{data}+' is consistent, the result is returned'".format(data = msg_input_var)
+            line = self.codegenutils.get_ros_info_logging_line(msg)
+            lines.append(lineprefix+line)
+        
+        line = "return {msgdict}[{jsond}['time']]\n".format(msgdict=self.messages_dict_name, jsond=jsondict)
+        lines.append(lineprefix + line)
+        
+        lineprefix = self.codegenutils.dec_indent(lineprefix)
+        
+        # in the else for the first if 
+        line = "else:\n"
+        lines.append(lineprefix+line)
+        lineprefix = self.codegenutils.inc_indent(lineprefix)
+        
+        # if the verdict is not true or unknown 
+        line = "{logfunc}({jsond})\n".format(logfunc=self.logging_fname,jsond=jsondict)
+        lines.append(lineprefix+line)
+        
+        if not silent:
+            msg = "'The event response' + {msg} + ' is inconsistent' ".format(msg=msg_input_var)
+            line = self.codegenutils.get_ros_info_logging_line(msg)
+            lines.append(lineprefix+line)
+        
+        manylines = ["error = MonitorError()\n",
+                     "error.m_service = {0}['service'].replace('_mon', '')\n".format(jsondict),
+                     "error.m_time = {0}['time']\n".format(jsondict),
+                     "error.m_property = {0}['spec']\n".format(jsondict),
+                     ]
+        lines=self.codegenutils.append_lines_to_list_with_prefix(lines, manylines, lineprefix)
+        
+        if oracle_action == 'nothing':
+            line = "error.m_content = str({dmsgs}[{jsond}['time']])\n".format(dmsgs=self.messages_dict_name,jsond=jsondict)
+            lines.append(lineprefix+line)
+        else:
+            manylines = ["{jsond}_copy = {jsond}.copy()\n".format(jsond=jsondict),
+                         "del {jsond}_copy['service']\n".format(jsond=jsondict),
+                         "del {jsond}_copy['time']\n".format(jsond=jsondict),
+                         "del {jsond}_copy['spec']\n".format(jsond=jsondict),
+                         
+                         # "del {jsond}_copy['error']\n".format(jsond=jsondict),
+                         "error.m_content = json.dumps({jsond}_copy)\n".format(jsond=jsondict)
+                         ]
+            lines = self.codegenutils.append_lines_to_list_with_prefix(lines, manylines, lineprefix)
+        line = "{monpubs}['error'].publish(error)\n".format(monpubs=self.mon_pubs_dict_name)
+        lines.append(lineprefix+line)
+
+        line="error=True\n"
+        lines.append(lineprefix+line)   
+        lineprefix = self.codegenutils.dec_indent(lineprefix)
+
+        line = "if {actions}[{jsond}['service']][0] != 'filter':\n".format(actions=self.actions_vname,jsond=jsondict)
+        lines.append(lineprefix+line)
+        lineprefix = self.codegenutils.inc_indent(lineprefix)
+        line = "service = {jsond}['service'] = {jsond}['service'].replace('_mon', '')\n".format(jsond=jsondict)
+        lines.append(lineprefix+line)
+        
+        if oracle_action == 'nothing':
+            line = "return {msgdict}[{jsond}['time']]\n".format(msgdict=self.messages_dict_name, jsond=jsondict)
+            lines.append(lineprefix + line)
+            
+        lineprefix = self.codegenutils.dec_indent(lineprefix)
+        line = "else:\n"
+        lines.append(lineprefix + line)
+        lineprefix = self.codegenutils.inc_indent(lineprefix)
+        line = "raise Exception('The request violates the monitor specification, so it has been filtered out.')\n\n"
+        lines.append(lineprefix + line)
+        lineprefix = self.codegenutils.dec_indent(lineprefix)
+        
+        self.codegenutils.check_indent("on message func done")    
+        return lines
+            
+    # class init function 
+    def get_variable_init_lines(self):
+        lines = [
+            "{dname}={{}}\n".format(dname=self.mon_pubs_dict_name),
+            "{dname}={{}}\n".format(dname=self.config_pubs_dict_name),
+            "{dname}={{}}\n".format(dname=self.config_subs_dict_name),
+            "{dname}={{}}\n".format(dname=self.config_client_srvs_dict_name),
+            "{dname}={{}}\n".format(dname=self.config_server_srvs_dict_name),
+            "{dname}={{}}\n".format(dname=self.services_info),
+            "{dname}={{}}\n".format(dname=self.messages_dict_name),
+            "{varname}=Lock()\n".format(varname=self.threading_loc_name),
+            "{0}={1}\n".format(self.monitor_id_vname,self.mon_name_input),
+            "{0}={1}\n".format(self.actions_vname,self.actions_name_input),
+            "{0}={1}\n".format(self.log_name,self.log_name_input),
+            "{tpinfo}={{}}\n".format(tpinfo=self.topics_info)
+            ]
+        
+        return lines
+    
+    def create_init_func(self,monitor_id,subscribers,tp_lists,services,srv_lists,config_callbacks_topic,config_callbacks_service,oracle_url,oracle_port):
+        self.codegenutils.reset_indent("init func start")
+        lineprefix = ''
+        
+        header = "def __init__(self,{0},{1},{2}):\n".format(self.mon_name_input,self.log_name_input,self.actions_name_input)
+        lines=[header]
+        
+        lineprefix = self.codegenutils.inc_indent(lineprefix)
+        
+        v_init_lines = self.get_variable_init_lines()
+        lines = self.codegenutils.append_lines_to_list_with_prefix(lines, v_init_lines, lineprefix)
+        
+        # ros init line
+        rosline = "super().__init__({monname})\n".format(monname=self.monitor_id_vname.replace('/','_'))
+        lines.append(lineprefix+rosline)
+        
+        mon_publishers = self.create_inherent_monitor_publisher_lines()
+        lines = self.codegenutils.append_lines_to_list_with_prefix(lines, mon_publishers, lineprefix)
+
+        publines = self.create_config_publishers_lines(subscribers,tp_lists)
+        lines = self.codegenutils.append_lines_to_list_with_prefix(lines, publines, lineprefix)
+
+        if self.publish_topics is not None:
+            line = "{pb}={val}\n".format(pb=self.pub_topics_name,val=self.publish_topics)
+            lines.append(lineprefix+line)
+
+        srvlines = self.create_config_client_services_lines(services,srv_lists)
+        lines = self.codegenutils.append_lines_to_list_with_prefix(lines, srvlines, lineprefix)
+        
+        tlines = self.create_topics_info_dict(tp_lists)
+        lines = self.codegenutils.append_lines_to_list_with_prefix(lines, tlines, lineprefix)
+
+        slines = self.create_services_info_dict(srv_lists)
+        lines = self.codegenutils.append_lines_to_list_with_prefix(lines, slines, lineprefix)
+        
+        # now we also need to create the subscribers 
+        # so if we have remapped a topic we need to subscribe to its remapped name 
+        # if not we just subscribe to the normal topic
+        slines = self.create_config_subscriber_lines(subscribers, tp_lists, config_callbacks_topic)
+        lines = self.codegenutils.append_lines_to_list_with_prefix(lines, slines, lineprefix)
+        slines = self.create_config_server_service_lines(services, srv_lists, config_callbacks_service)
+        lines = self.codegenutils.append_lines_to_list_with_prefix(lines, slines, lineprefix)
+        
+        msg = "'Monitor' + {mname} + ' started and ready' ".format(mname=self.monitor_id_vname)
+        line = self.codegenutils.get_ros_info_logging_line(msg)
+        lines.append(lineprefix+line)
+        
+        msg = "'Logging at' + {logname} ".format(logname=self.log_name)
+        line = self.codegenutils.get_ros_info_logging_line(msg)
+        lines.append(lineprefix+line)
+        
+        if oracle_url != None and oracle_port != None:
+            wslines = [
+                "websocket.enableTrace(True)\n",
+                "{ws} = websocket.WebSocket()\n".format(ws=self.websocket_name),
+                "{ws}.connect('ws://{u}:{p}')\n".format(ws=self.websocket_name,u=oracle_url,p=oracle_port)
+                ]
+            lines = self.codegenutils.append_lines_to_list_with_prefix(lines,wslines,lineprefix)
+    
+            msg = "'Websocket is open'"
+            line = self.codegenutils.get_ros_info_logging_line(msg)
+            lines.append(lineprefix+line)
+        
+        self.codegenutils.check_indent("init funct end")
+        return lines
+    
+    def create_topics_info_dict(self,tp_lists):
+        lines=[]
+        for t in tp_lists:
+            line = "{t_info_var}['{tname}']={tdict}\n".format(t_info_var=self.topics_info,tname=t,tdict=tp_lists[t])
+            lines.append(line)
+            
+        return lines
+    
+    def create_services_info_dict(self,srv_lists):
+        lines=[]
+        for s in srv_lists:
+            line = "{s_info_var}['{sname}']={sdict}\n".format(s_info_var=self.services_info,sname=s,sdict=srv_lists[s])
+            lines.append(line)
+            
+        return lines
+    
+    
+
+    
+    
+    def create_mon_class_lines(self,topics_with_types_and_action,services_with_types_and_action,monitor_id,silent,oracle_action,oracle_url,oracle_port):
+        self.codegenutils.reset_indent("mon class creation start")
+        lineprefix = ''
+        lines = []
+        new_line = self.codegenutils.new_line
+        # create the python header 
+        h_line = self.codegenutils.create_python_header()
+        lines.append(lineprefix+h_line)
+        lines.append(new_line)
+        # add the import lines  
+        tp_lists= self.get_topic_and_service_msg_types(topics_with_types_and_action)
+        srv_lists= self.get_topic_and_service_msg_types(services_with_types_and_action)
+        subscribers = self.get_subscribers(topics_with_types_and_action)
+        services = self.get_services(services_with_types_and_action)
+        i_lines = self.create_import_lines(tp_lists,srv_lists)
+        lines = self.codegenutils.append_lines_to_list_with_prefix(lines, i_lines, lineprefix)
+        lines.append(new_line)
+        # create the class header
+        c_line = self.create_class_header(monitor_id)
+        lines.append(lineprefix+c_line)
+        lines.append(new_line)
+        # increment the line prefix 
+        lineprefix = self.codegenutils.inc_indent(lineprefix)
+        
+        
+        # do the callbacks 
+        config_callbacks_topic = self.create_config_callbacks_topic(subscribers, tp_lists, silent, oracle_action, oracle_url, oracle_port)
+        # for now just print the call back functions 
+        for t in config_callbacks_topic:
+            cblines = config_callbacks_topic[t]['lines']
+            lines.append(new_line)
+            lines=self.codegenutils.append_lines_to_list_with_prefix(lines, cblines, lineprefix)
+        config_callbacks_service = self.create_config_callbacks_service(services, srv_lists, silent, oracle_action, oracle_url, oracle_port)
+        # for now just print the call back functions 
+        for s in config_callbacks_service:
+            cblines = config_callbacks_service[s]['lines']
+            lines.append(new_line)
+            lines=self.codegenutils.append_lines_to_list_with_prefix(lines, cblines, lineprefix)
+            
+            
+        lines.append(new_line)
+        # do the init funciton 
+        init_lines = self.create_init_func(monitor_id,subscribers,tp_lists,services,srv_lists,config_callbacks_topic,config_callbacks_service,oracle_url,oracle_port)
+        lines = self.codegenutils.append_lines_to_list_with_prefix(lines, init_lines, lineprefix)
+        lines.append(new_line)
+        
+        # do on message 
+        lines.append(new_line)    
+        if oracle_url !=None and oracle_port != None:
+            on_message_lines = self.create_on_message_topic(silent, oracle_action, tp_lists)
+            lines=self.codegenutils.append_lines_to_list_with_prefix(lines,on_message_lines,lineprefix)
+
+        if srv_lists:
+            on_message_lines = self.create_on_message_service_request(silent, oracle_action, srv_lists, oracle_url != None and oracle_port != None)
+            lines=self.codegenutils.append_lines_to_list_with_prefix(lines,on_message_lines,lineprefix)
+            on_message_lines = self.create_on_message_service_response(silent, oracle_action, srv_lists, oracle_url != None and oracle_port != None)
+            lines=self.codegenutils.append_lines_to_list_with_prefix(lines,on_message_lines,lineprefix)
+            
+        lines.append(new_line)
+        
+        # do logging 
+        logging_lines = self.create_logging_func()
+        lines=self.codegenutils.append_lines_to_list_with_prefix(lines, logging_lines, lineprefix)
+        lines.append(new_line)
+        
+        # lineprefix = self.codegenutils.dec_indent(lineprefix)
+        self.codegenutils.check_indent("mon class creation func ")
+
+        # srvlines = self.create_config_client_services_lines(services,srv_lists)
+        
+        # TBC
+        
+        return lines
+               
+    def create_service_node(self):
+        lines = []
+        lineprefix = ''
+        line = "class ServiceNode(Node):\n"
+        lines.append(lineprefix + line)
+        lineprefix = self.codegenutils.inc_indent(lineprefix)
+        line = "def __init__(self, service_type, service_name):\n"
+        lines.append(lineprefix + line)
+        lineprefix = self.codegenutils.inc_indent(lineprefix)
+        line = "super().__init__('service_node_' + service_name.replace('/', '_'))\n"
+        lines.append(lineprefix + line)
+        line = "self.cli = self.create_client(service_type, service_name)\n"
+        lines.append(lineprefix + line)
+        line = "while not self.cli.wait_for_service(timeout_sec=1.0):\n"
+        lines.append(lineprefix + line)
+        lineprefix = self.codegenutils.inc_indent(lineprefix)
+        line = "self.get_logger().info('service not available, waiting again...')\n"
+        lines.append(lineprefix + line)
+        lineprefix = self.codegenutils.dec_indent(lineprefix)
+        lineprefix = self.codegenutils.dec_indent(lineprefix)
+        line = "def call_service(self, request):\n"
+        lines.append(lineprefix + line)
+        lineprefix = self.codegenutils.inc_indent(lineprefix)
+        line = "self.future = self.cli.call_async(request)\n"
+        lines.append(lineprefix + line)
+        line = "rclpy.spin_until_future_complete(self, self.future)\n"
+        lines.append(lineprefix + line)
+        line = "return self.future.result()\n"
+        lines.append(lineprefix + line)
+        lineprefix = self.codegenutils.dec_indent(lineprefix)
+        lineprefix = self.codegenutils.dec_indent(lineprefix)
+        return lines
+            
+        
+    def create_mon_file_lines(self,topics_with_types_and_action,services_with_types_and_action,monitor_id,silent,oracle_action,oracle_url,oracle_port,log):
+        self.codegenutils.reset_indent("mon file func")
+        lineprefix = ''
+        lines = self.create_mon_class_lines(topics_with_types_and_action,services_with_types_and_action,monitor_id,silent,oracle_action,oracle_url,oracle_port)
+        
+        mlines = self.create_main_func_lines(topics_with_types_and_action,services_with_types_and_action,log,monitor_id)
+        lines = self.codegenutils.append_lines_to_list_with_prefix(lines, mlines, lineprefix)
+        
+        lines.append(self.codegenutils.new_line)
+        mlines = self.create_python_main_lines()
+        lines = self.codegenutils.append_lines_to_list_with_prefix(lines, mlines, lineprefix)
+        
+        self.codegenutils.check_indent("mon file creation func done")
+        return lines
+    
+    
+    def create_main_func_lines(self,topics_with_types_and_action,services_with_types_and_action,log,monitor_id):
+        self.codegenutils.reset_indent("create main func ")
+        lineprefix = ''
+        header = "def main(args=None):\n"
+        lines = [header]
+        
+        lineprefix=self.codegenutils.inc_indent(lineprefix)
+        line = "rclpy.init(args=args)\n"
+        lines.append(lineprefix+line)
+        
+        line = "log = '{l}'\n".format(l=log)
+        lines.append(lineprefix+line)
+        
+        line = "actions = {}\n"
+        lines.append(lineprefix+line)
+        for tp in topics_with_types_and_action:
+            warning = 0 
+            if 'warning' in tp:
+                warning = tp['warning']
+            line = "actions['{tpn}']=('{act}',{w})\n".format(tpn=tp['name'],act=tp['action'],w=warning)
+            lines.append(lineprefix+line)
+        for srv in services_with_types_and_action:
+            warning = 0 
+            if 'warning' in srv:
+                warning = srv['warning']
+            line = "actions['{srvn}']=('{act}',{w})\n".format(srvn=srv['name'],act=srv['action'],w=warning)
+            lines.append(lineprefix+line)
+        
+        line = "monitor = {mclassname}('{mid}',log,actions)\n".format(mclassname=self.get_mon_class_name(monitor_id),mid=monitor_id)
+        
+        lines.append(lineprefix+line)
+        mlines = ["rclpy.spin(monitor)\n",
+                "monitor.{wsname}.close()\n".format(wsname=self.websocket_name.replace("self.","")),
+                "monitor.destroy_node()\n",
+                "rclpy.shutdown()\n"
+                ]
+        lines=self.codegenutils.append_lines_to_list_with_prefix(lines, mlines, lineprefix)
+        
+        self.codegenutils.check_indent("create main func ")
+        return lines
+     
+    
+    
+    def create_python_main_lines(self):
+        self.codegenutils.reset_indent("create python main func ")
+        lineprefix = ''
+        lines = ["if __name__ == '__main__':\n"]
+        lineprefix = self.codegenutils.inc_indent(lineprefix)
+        line = "main()\n"
+        lines.append(lineprefix+line)
+        self.codegenutils.check_indent("create python main func ")
+        return lines   
+    
+
+
+                  
+    def create_import_lines(self, tp_lists, srv_lists):
+        plain_import = ['json',
+                        'yaml',
+                        'websocket',
+                        'sys',
+                        'rclpy',
+                        'rosidl_runtime_py']
+        from_import = {'rclpy.node':'Node',
+                     'threading':'*',
+                     'rosmonitoring_interfaces.msg':'MonitorError',
+                     'std_msgs.msg':'*',
+                     'rclpy.callback_groups':'MutuallyExclusiveCallbackGroup'}
+        
+        ''' generate import lines for all the other message types '''
+        for tp in tp_lists:
+            package = tp_lists[tp]['package']
+            # type = tp_lists[tp]['type']
+            if not package in from_import:
+                from_import[package] = '*'
+        for srv in srv_lists:
+            package = srv_lists[srv]['package']
+            # type = srv_lists[srv]['type']
+            if not package in from_import:
+                from_import[package] = '*'
+        
+        ''' now lets generate the lines  '''
+        import_lines = ["# begin imports\n"]
+        for package in plain_import:
+            line = "import {0}\n".format(package)
+            import_lines.append(line)
+            
+        for package in from_import:
+            line = "from {p} import {t}\n".format(p=package, t=from_import[package])
+            import_lines.append(line)
+        import_lines.append("# done import\n")
+            
+        return import_lines
+
+  
+        
+    def create_config_callbacks_topic(self, subscribers, tp_lists, silent,oracle_action,oracle_url,oracle_port):
+        callbacks = {}
+        for topic in subscribers:
+            callbacks[topic] = self.create_callback_func_topic(topic,subscribers[topic],tp_lists[topic],silent,oracle_action,oracle_url,oracle_port)
+        return callbacks
+
+    def create_config_callbacks_service(self, services, srv_lists, silent,oracle_action,oracle_url,oracle_port):
+        callbacks = {}
+        for service in services:
+            callbacks[service] = self.create_callback_func_service(service,services[service],srv_lists[service],silent,oracle_action,oracle_url,oracle_port)
+        return callbacks
+    
+
+    def create_callback_func_topic(self, tname, tinfo, tmsg_type, silent, oracle_action, oracle_url, oracle_port):
+        self.codegenutils.reset_indent("callback func start")
+        tpname = tname
+        if tinfo['remapped']:
+            tpname = self.get_remapped_name(tpname)
+        lineprefix = self.codegenutils.inc_indent('')
+        func_name = "callback{tname}".format(tname=tname).replace('/', '_')
+        func_input_varname = 'data'
+        header = "def {fname}(self,{f_input}):\n".format(fname=func_name, f_input=func_input_varname)
+        lines = [header]
+        
+        data_dict_name = "dict"
+
+        # log output if not silent
+        if not silent:
+            message = '"monitor has observed "+ str({0})'.format(func_input_varname)
+            
+            line = self.codegenutils.get_ros_info_logging_line(message)
+            lines.append(lineprefix + line)
+        # convert the data to send to the oracle or log
+        line = "{0}= rosidl_runtime_py.message_to_ordereddict({1})\n".format(data_dict_name, func_input_varname)
+        lines.append(lineprefix + line)
+        
+        line = "{data_dict_name}['topic']='{tname}'\n".format(data_dict_name=data_dict_name, tname=tname)
+        lines.append(lineprefix + line)
+        
+        line = "{data_dict_name}['time']={ros_time}\n".format(data_dict_name=data_dict_name, ros_time=self.codegenutils.get_ros_time_line())
+        lines.append(lineprefix + line)
+        
+        line = "{ws_lock}.acquire()\n".format(ws_lock=self.threading_loc_name)
+        lines.append(lineprefix + line)
+        # making sure we don't overwrite in the dictionary
+        if oracle_action == 'nothing':
+            line = "while {data_dname}['time'] in {msg_dname}:\n".format(data_dname=data_dict_name, msg_dname=self.messages_dict_name)
+            lines.append(lineprefix + line)
+            lineprefix = self.codegenutils.inc_indent(lineprefix)
+            line = "{data_dname}['time']+=0.01\n".format(data_dname=data_dict_name)
+            lines.append(lineprefix + line)
+            lineprefix = self.codegenutils.dec_indent(lineprefix)
+            
+        do_oracle = oracle_url != None and oracle_port != None
+        log_msg = "event "
+        oracle_response_varname = "message"   
+        # if online monitor then we need to send things to the oracle
+        if do_oracle:
+            log_msg += "propagated to oracle" 
+            line = "{ws}.send(json.dumps({data_dname}))\n".format(ws=self.websocket_name, data_dname=data_dict_name)
+            lines.append(lineprefix + line)
+            if oracle_action == 'nothing':
+                line = "{msgs_dname}[{data_dname}['time']] = {input_varname}\n".format(msgs_dname=self.messages_dict_name, data_dname=data_dict_name, input_varname=func_input_varname)
+                lines.append(lineprefix + line)
+            line = "{msg}={ws}.recv()\n".format(msg=oracle_response_varname, ws=self.websocket_name)
+            lines.append(lineprefix + line)
+        else:
+            log_msg += "successfully logged"
+            line = "{logging_fname}({data_dname})\n".format(logging_fname=self.logging_fname, data_dname=data_dict_name)
+            lines.append(lineprefix + line)
+            if tinfo['republish']:
+                # if we need to republish then go ahead and do that
+                # TODO: add line here
+                line = ""
+                
+        line = "{ws_lock}.release()\n".format(ws_lock=self.threading_loc_name)
+        lines.append(lineprefix + line)
+        
+        if not silent:
+            line = self.codegenutils.get_ros_info_logging_line('"{0}"'.format(log_msg))
+            lines.append(lineprefix + line)
+            
+        if do_oracle:
+            line = "{msg_fname}({msg_vname})\n".format(msg_fname=self.message_received_fname_topic, msg_vname=oracle_response_varname)
+            lines.append(lineprefix + line)
+        
+        self.codegenutils.check_indent("create callback func done")   
+        return {'name':func_name, 'lines':lines}
+    
+    def create_callback_func_service(self, srvname, srvinfo, srvmsg_type, silent, oracle_action, oracle_url, oracle_port):
+        self.codegenutils.reset_indent("callback func start")
+        if srvinfo['remapped']:
+            srvname = self.get_remapped_name(srvname)
+        lineprefix = self.codegenutils.inc_indent('')
+        func_name = "callback{srvname}".format(srvname=srvname).replace('/', '_')
+        func_request = 'request'
+        func_response = 'response'
+        header = "def {fname}(self, {f_req}, {f_res}):\n".format(fname=func_name, f_req=func_request, f_res=func_response)
+        lines = [header]
+        
+        data_dict_name = "dict"
+
+        # log output if not silent
+        if not silent:
+            message = '"monitor has observed a service request with "+ str({0})'.format(func_request)
+            
+            line = self.codegenutils.get_ros_info_logging_line(message)
+            lines.append(lineprefix + line)
+        # convert the data to send to the oracle or log
+        line = "dict = {}\n"
+        lines.append(lineprefix + line)
+        line = "{0}['request']= rosidl_runtime_py.message_to_ordereddict({1})\n".format(data_dict_name, func_request)
+        lines.append(lineprefix + line)
+        
+        line = "{data_dict_name}['service']='{srvname}'\n".format(data_dict_name=data_dict_name, srvname=srvname.replace('_mon', ''))
+        lines.append(lineprefix + line)
+        
+        line = "{data_dict_name}['time']={ros_time}\n".format(data_dict_name=data_dict_name, ros_time=self.codegenutils.get_ros_time_line())
+        lines.append(lineprefix + line)
+        
+        line = "{ws_lock}.acquire()\n".format(ws_lock=self.threading_loc_name)
+        lines.append(lineprefix + line)
+        # making sure we don't overwrite in the dictionary
+        if oracle_action == 'nothing':
+            line = "while {data_dname}['time'] in {msg_dname}:\n".format(data_dname=data_dict_name, msg_dname=self.messages_dict_name)
+            lines.append(lineprefix + line)
+            lineprefix = self.codegenutils.inc_indent(lineprefix)
+            line = "{data_dname}['time']+=0.01\n".format(data_dname=data_dict_name)
+            lines.append(lineprefix + line)
+            lineprefix = self.codegenutils.dec_indent(lineprefix)
+            
+        do_oracle = oracle_url != None and oracle_port != None
+        log_msg = "event "
+        oracle_response_varname = "message"   
+
+        # line = "{data_dname}['request'] = {f_req}\n".format(data_dname=data_dict_name, f_req=func_request)
+        # line = "{data_dname}['request'] = True\n".format(data_dname=data_dict_name)
+        # lines.append(lineprefix+line)
+        # line = "{data_dname}['result']  = {srvdict}[{srvname}].call({f_req})\n".format(srvname=srvname, srvdict=self.config_client_srvs_dict_name,msgdict=self.messages_dict_name,f_req=func_request, f_res=func_response)
+        # lines.append(lineprefix+line)
+
+        # if online monitor then we need to send things to the oracle
+        if do_oracle:
+            log_msg += "propagated to oracle" 
+            line = "{ws}.send(json.dumps({data_dname}))\n".format(ws=self.websocket_name, data_dname=data_dict_name)
+            lines.append(lineprefix + line)
+            line = "{msgs_dname}[{data_dname}['time']] = {input_varname}\n".format(msgs_dname=self.messages_dict_name, data_dname=data_dict_name, input_varname=func_request)
+            lines.append(lineprefix + line)
+            line = "{msg}={ws}.recv()\n".format(msg=oracle_response_varname, ws=self.websocket_name)
+            lines.append(lineprefix + line)
+        else:
+            # log_msg += "successfully logged"
+            # line = "{logging_fname}({data_dname})\n".format(logging_fname=self.logging_fname, data_dname=data_dict_name)
+            # lines.append(lineprefix + line)
+            line = "{data_dname}['verdict']='currently_true'\n".format(data_dname=data_dict_name)
+            lines.append(lineprefix + line)
+            line = "{msg}=json.dumps({data_dname})\n".format(msg=oracle_response_varname, data_dname=data_dict_name)
+            lines.append(lineprefix + line)
+            line = "{msgs_dname}[{data_dname}['time']] = {input_varname}\n".format(msgs_dname=self.messages_dict_name, data_dname=data_dict_name, input_varname=func_request)
+            lines.append(lineprefix + line)
+                
+        line = "{ws_lock}.release()\n".format(ws_lock=self.threading_loc_name)
+        lines.append(lineprefix + line)
+        
+        if not silent:
+            line = self.codegenutils.get_ros_info_logging_line('"{0}"'.format(log_msg))
+            lines.append(lineprefix + line)
+            
+        line = "try:\n"
+        lines.append(lineprefix + line)
+        lineprefix = self.codegenutils.inc_indent(lineprefix)
+        line = "return {msg_fname}({msg_vname})\n".format(msg_fname=self.message_received_fname_service_request, msg_vname=oracle_response_varname)
+        lines.append(lineprefix + line)
+        lineprefix = self.codegenutils.dec_indent(lineprefix)
+        line = "except:\n"
+        lines.append(lineprefix + line)
+        lineprefix = self.codegenutils.inc_indent(lineprefix)
+        line = "{f_res}.error = True\n".format(f_res=func_response)
+        lines.append(lineprefix + line)
+        line = "return {f_res}\n".format(f_res=func_response)
+        lines.append(lineprefix + line)
+        lineprefix = self.codegenutils.dec_indent(lineprefix)
+        
+        self.codegenutils.check_indent("create callback func done")   
+        return {'name':func_name, 'lines':lines}
+
+        
+    def create_inherent_monitor_publisher_lines(self):
+        pub_types = {'error':'MonitorError', 'verdict':'String'}
+        comments = "# creating the verdict and error publishers for the monitor\n"
+        lines = [comments]
+
+        for pt in pub_types:
+            pubname =  "{monname}+'/monitor_{pt}'".format(monname=self.monitor_id_vname,pt=pt)
+            # "{}" + "'"+'/monitor_' + pt + "'"
+            ros_pub_creation_line = self.codegenutils.ros_publisher_creation_command(pubname, pub_types[pt], self.queue_size,False)
+            line = "{dictname}['{pubtype}']={ros_pub_line}\n".format(dictname=self.mon_pubs_dict_name, pubtype=pt, ros_pub_line=ros_pub_creation_line)
+            lines.append(line)
+        comments = "# done creating monitor publishers\n\n"
+        lines.append(comments)
+
+        return lines
+    
+    
+    def create_package_xml(self,tp_lists,location):
+        
+        child_to_insert_after = 11
+        tree = ET.parse(location+".packagexml")
+        root = tree.getroot()
+        children = list(root)
+        
+            
+        # so now we insert the relevant packages
+        pkgs_so_far = []
+        for t in tp_lists:
+            new_field = ET.Element("exec_depend")
+            if tp_lists[t]['package'] not in pkgs_so_far:
+                package,sep,tail = tp_lists[t]['package'].partition('.')
+                new_field .text=package
+                pkgs_so_far.append(package)
+            root.insert(child_to_insert_after,new_field)
+        
+        print ("Updated package.xml")    
+        # ET.dump(root)
+        tree.write(location+'package.xml')
+        
+    def generate_monitor_package(self,monitor_id, topics_with_types_and_action, services_with_types_and_action, log, url, port, oracle_action, silent, warning):
+        monloc = 'code/monitor/monitor/'
+        packageloc = 'code/monitor/'
+        lines = self.create_mon_file_lines(topics_with_types_and_action, services_with_types_and_action, monitor_id, silent, oracle_action, url, port, log)
+        if services_with_types_and_action:
+            lines.extend(self.create_service_node())
+        tp_lists = self.get_topic_and_service_msg_types(topics_with_types_and_action)
+        tp_lists.update(self.get_topic_and_service_msg_types(services_with_types_and_action))
+        self.codegenutils.write_lines(lines, monitor_id, monloc)
+        self.create_package_xml(tp_lists, packageloc)
+            
+            
+class LaunchFileGen(object):
+    
+    def create_node_node(self,fpkg,execfile,nodename,foutput="screen"):
+        return ET.Element("node", pkg=fpkg,exec=execfile,name=nodename,output=foutput)
+    
+    def create_launch_node(self):
+        return ET.Element("launch")
+    
+    def create_monitor_launch(self,monitor_ids,package_name):
+        root = self.create_launch_node()
         for id in monitor_ids:
-            str += '''
-<node pkg="monitor" type="{monitor_id}.py" name="{monitor_id}" output="screen"/>
-            '''.format(monitor_id = id)
-        str += '''
-</launch>
-        '''
-        launch_file.write(str)
+            nodename = sr.script_name(id)
+            node_elem = self.create_node_node(package_name, nodename, nodename)
+            root.insert(0,node_elem)
+            
+        return root
+    
+    def write_monitor_launch(self,monitor_ids,package_name,loc):
+        root_elem = self.create_monitor_launch(monitor_ids, package_name)
+        self.write_launch_file(root_elem, loc+'monitor.launch')
+        
+    def write_launch_file(self,root_elem,locfn):
+        tree = ET.ElementTree(root_elem)
+        print("writing to "+locfn)
+        tree.write(locfn)
+    
+    
+    def instrument_node_launch_files(self,nodes):
+        launch_files={}
+        if not nodes:
+            return 
+        for name in nodes:
+            (package,path,topics) = nodes[name]
+            if path not in launch_files:
+                launch_files[path] = []
+            launch_files[path].append((name,package,topics))
+        for path in launch_files:
+            file_name = path.replace('.launch', '_instrumented.launch')
+            tree = ET.parse(path)
+            launch = tree.getroot()
+            for node in launch.findall('node'):
+                for (name, package, topics) in launch_files[path]:
+                    if node.get('name') == name and node.get('pkg') == package:
+                        for topic in topics:
+                            remap = ET.SubElement(node, 'remap')
+                            remap.set('from', topic)
+                            remap.set('to', topic + '_mon')
+                        break
+            self.write_launch_file(launch, file_name)    
+            
+               
 
-# instrument the launch files through adding/removing remap params
-def instrument_launch_files(nodes):
-    if not nodes: return
-    launch_files = {}
-    for name in nodes:
-        (package, path, topics) = nodes[name]
-        if path not in launch_files:
-            launch_files[path] = []
-        launch_files[path].append((name, package, topics))
-    for path in launch_files:
-        file_name = path.replace('.launch', '_instrumented.launch')
-        tree = ET.parse(path)
-        launch = tree.getroot()
-        for node in launch.findall('node'):
-            for (name, package, topics) in launch_files[path]:
-                if node.get('name') == name and node.get('pkg') == package:
-                    for topic in topics:
-                        remap = ET.SubElement(node, 'remap')
-                        remap.set('from', topic)
-                        remap.set('to', topic + '_mon')
-                    break
-        tree.write(file_name)
+
+
+            

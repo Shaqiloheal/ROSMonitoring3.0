@@ -1,1 +1,1 @@
-<launch><node pkg="monitor" exec="monitor" name="monitor" output="screen" /></launch>
+<launch><node pkg="monitor" exec="monitor_temperature" name="monitor_temperature" output="screen" /><node pkg="monitor" exec="monitor_pubsub" name="monitor_pubsub" output="screen" /></launch>

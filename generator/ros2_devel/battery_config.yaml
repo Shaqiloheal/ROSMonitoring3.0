@@ -1,4 +1,4 @@
-path: /home/angelo/Desktop/ROS_ws/src/  # this is the path to the ros workspace you'd like the monitor package in
+path: /home/shaqiloheal/ros2_ws/src/  # this is the path to the ros workspace you'd like the monitor package in
 # nodes: # here we list the nodes we are going to monitor
 #   - node:
 #       name: talker

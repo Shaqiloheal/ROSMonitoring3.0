@@ -1,5 +1,4 @@
-hello matches {topic:'chatter', data:'hello'};
-count matches {topic:'count', data:val} with val > 100;
-over18 matches {topic:'person', age: val} with val > 17;
+overheat_temperature matches {topic:'temperature', data:val} with val > 50.0;
+good_temperature matches {topic:'temperature', data:val} with val >= 0.0 && val <= 50.0;
 
-Main = (hello \/ count \/ over18)*;
+Main = (good_temperature \/ negative_temperature \/ overheat_temperature)*;
