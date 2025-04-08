@@ -99,9 +99,6 @@ def main(argv):
 				monpathfound = True
 				monloc = monpath + package_name + '/' + package_name + '/'
 				packageloc = monpath + package_name + '/'
-							
-								
-						
 					
 			if 'nodes' in config:  # check if there are nodes to be instrumented
 				for node in config['nodes']:
@@ -117,8 +114,8 @@ def main(argv):
 				ids = []
 				for monitor in config['monitors']:
 
-					if 'id' not in monitor['monitor'] or ('topics' not in monitor['monitor'] and 'services' not in monitor['monitor']) or 'log' not in monitor['monitor']:
-						print('Each monitor in the configuration file must contain the id, log and list of the topics (or services) fields.')
+					if 'id' not in monitor['monitor'] or ('topics' not in monitor['monitor'] and 'services' not in monitor['monitor'] and 'actions' not in monitor['monitor']) or 'log' not in monitor['monitor']:
+						print('Each monitor in the configuration file must contain the id, log and at least one of the lists: topics, services, actions.')
 						return
 					if 'oracle' in monitor['monitor']  and ('port' not in monitor['monitor']['oracle'] or 'url' not in monitor['monitor']['oracle'] or 'action' not in monitor['monitor']['oracle']):
 						print('Url, port and action must be specified inside the oracle.')
@@ -127,6 +124,9 @@ def main(argv):
 						monitor['monitor']['topics'] = []
 					if 'services' not in monitor['monitor']:
 						monitor['monitor']['services'] = []
+					if 'actions' not in monitor['monitor']:
+						monitor['monitor']['actions'] = []
+
 					for topic_with_types_and_action in monitor['monitor']['topics']:
 						if 'name' not in topic_with_types_and_action or 'type' not in topic_with_types_and_action or 'action' not in topic_with_types_and_action:
 							print('Each topic needs a name, a type and an action.')
@@ -138,7 +138,7 @@ def main(argv):
 							print('In order to filter the wrong messages, the monitor has to be ONLINE and in the middle of the communication. To have this, the \'oracle\' field and the list of publishers (or subscribers) must be given.')
 							return
 						if 'publishers' in topic_with_types_and_action and 'subscribers' in topic_with_types_and_action:
-							print('The publishers and subscribers fileds are mutually exclusive. The instrumentation process affects only one side per time.')
+							print('The publishers and subscribers fields are mutually exclusive. The instrumentation process affects only one side per time.')
 							return
 						if 'publishers' in topic_with_types_and_action:
 							for publisher in topic_with_types_and_action['publishers']:
@@ -152,6 +152,7 @@ def main(argv):
 									print('The subscriber ' + subscriber + ' has not been defined in the list of nodes.')
 									return
 								nodes[subscriber][2].append(topic_with_types_and_action['name'])
+
 					for service_with_types_and_action in monitor['monitor']['services']:
 						if 'name' not in service_with_types_and_action or 'type' not in service_with_types_and_action or 'action' not in service_with_types_and_action:
 							print('Each service needs a name, a type and an action.')
@@ -159,6 +160,33 @@ def main(argv):
 						if service_with_types_and_action['action'] not in ['log', 'filter']:
 							print('The actions available for the services are: log, filter.')
 							return
+
+					for action_with_types_and_action in monitor['monitor']['actions']:
+						if 'name' not in action_with_types_and_action or 'type' not in action_with_types_and_action or 'action' not in action_with_types_and_action:
+							print('Each action needs a name, a type and an action.')
+							return
+						if action_with_types_and_action['action'] not in ['log', 'filter']:
+							print('The actions available for the actions are: log, filter.')
+							return
+						if (('publishers' not in action_with_types_and_action and 'subscribers' not in action_with_types_and_action) or 'oracle' not in monitor['monitor']) and action_with_types_and_action['action'] == 'filter':
+							print('In order to filter the wrong actions, the monitor has to be ONLINE and in the middle of the communication. To have this, the \'oracle\' field and the list of publishers (or subscribers) must be given.')
+							return
+						if 'publishers' in action_with_types_and_action and 'subscribers' in action_with_types_and_action:
+							print('The publishers and subscribers fields are mutually exclusive for actions too.')
+							return
+						if 'publishers' in action_with_types_and_action:
+							for publisher in action_with_types_and_action['publishers']:
+								if publisher not in nodes:
+									print('The publisher ' + publisher + ' for action has not been defined in the list of nodes.')
+									return
+								nodes[publisher][2].append(action_with_types_and_action['name'])
+						if 'subscribers' in action_with_types_and_action:
+							for subscriber in action_with_types_and_action['subscribers']:
+								if subscriber not in nodes:
+									print('The subscriber ' + subscriber + ' for action has not been defined in the list of nodes.')
+									return
+								nodes[subscriber][2].append(action_with_types_and_action['name'])
+
 					if 'oracle' in monitor['monitor']:
 						url = monitor['monitor']['oracle']['url']
 						port = monitor['monitor']['oracle']['port']
@@ -173,6 +201,7 @@ def main(argv):
 						url = None
 						port = None
 						oracle_action = None
+
 					ids.append(monitor['monitor']['id'])
 					if 'silent' in monitor['monitor'] and monitor['monitor']['silent']:
 						silent = True
@@ -183,7 +212,9 @@ def main(argv):
 					else:
 						warning = 0
 					monGen = MonitorGenerator()
-					monGen.generate_monitor_package(monitor['monitor']['id'], monitor['monitor']['topics'], monitor['monitor']['services'], monitor['monitor']['log'], url, port, oracle_action, silent, warning)
+					# Modified to pass 'actions'
+					monGen.generate_monitor_package(monitor['monitor']['id'], monitor['monitor']['topics'], monitor['monitor']['services'], monitor['monitor']['actions'], monitor['monitor']['log'], url, port, oracle_action, silent, warning)
+
 				lfg = LaunchFileGen()
 				launchpath = 'code/monitor/launch/'
 				lfg.write_monitor_launch(ids, 'monitor', launchpath)

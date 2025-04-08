@@ -119,6 +119,14 @@ class CodeGenAndROSUtils():
             return "self.create_client({srvtype}, '{srvname}', callback_group=MutuallyExclusiveCallbackGroup())\n".format(srvname=srvname, srvtype=srvtype)
         else:
             return "self.create_client({srvtype}, {srvname}, callback_group=MutuallyExclusiveCallbackGroup())\n".format(srvname=srvname, srvtype=srvtype)
+
+    # Actions    
+    def ros_action_client_creation_command(self, actionname, actiontype, doStringName=True):
+        if doStringName:
+            return "ActionClientNode({actiontype}, '{actionname}')\n".format(actiontype=actiontype, actionname=actionname)
+        else:
+            return "ActionClientNode({actiontype}, {actionname})\n".format(actiontype=actiontype, actionname=actionname)
+
     
             
         
@@ -134,6 +142,9 @@ class MonitorGenerator():
         self.config_subs_dict_name = 'self.config_subscribers'
         self.config_client_srvs_dict_name = 'self.config_client_services'
         self.config_server_srvs_dict_name = 'self.config_server_services'
+        self.config_client_actions_dict_name = 'self.config_client_actions' # Actions
+        self.config_server_actions_dict_name = 'self.config_server_actions' # Actions
+        self.actions_info = 'self.actions_info' # Actions
         self.messages_dict_name = 'self.dict_msgs'
         self.threading_loc_name = 'self.ws_lock'
         self.websocket_name = 'self.ws'
@@ -171,6 +182,17 @@ class MonitorGenerator():
             topic = topic_msg_details['name']
             tp_lists[topic] = {'package':package, 'type':type}
         return tp_lists
+    
+    # Actions
+    def get_action_msg_types(self, actions_with_types_and_action):
+        action_lists = {}
+        for action_msg_details in actions_with_types_and_action:
+            package = action_msg_details['type'][0:action_msg_details['type'].rfind('.')]
+            type = action_msg_details['type'][action_msg_details['type'].rfind('.') + 1:]
+            action = action_msg_details['name']
+            action_lists[action] = {'package': package, 'type': type}
+        return action_lists
+
      
     def get_subscribers(self, topics_with_types_and_action):
         subscribers = {}
@@ -242,6 +264,29 @@ class MonitorGenerator():
         line = self.codegenutils.ros_client_service_creation_command(srvname, srvtype)
         return line
     
+    # Actions
+    def create_client_action_line(self, name, actioninfo, actionmsg_type):
+        if not actioninfo['republish']:
+            return None
+        actionname = name
+        if not actioninfo['remapped']:
+            actionname = self.get_remapped_name(actionname)
+        actiontype = actionmsg_type['type']
+        line = self.codegenutils.ros_action_client_creation_command(actionname, actiontype)
+        return line
+
+    
+    # Actions
+    def create_server_action_line(self, name, actioninfo, actionmsg_type, cbname):
+        actionname = name
+        actiontype = actionmsg_type['type']
+        if actioninfo['remapped']:
+            actionname = self.get_remapped_name(actionname)
+        line = "ActionServerNode({actiontype}, '{actionname}', {cbname})".format(actiontype=actiontype, actionname=actionname, cbname=cbname)
+        return line
+
+
+    
     def create_config_subscriber_lines(self,subscribers,tp_lists,cbdict):
         lines = []
         for t in subscribers:
@@ -259,6 +304,28 @@ class MonitorGenerator():
             lines.append(line)
             
         return lines
+    
+    # Actions
+    def create_config_client_actions_lines(self, actions, action_lists):
+        lines = []
+        for a in actions:
+            actionline = self.create_client_action_line(a, actions[a], action_lists[a])
+            if actionline is not None:
+                line = "{config_actions_dname}['{aname}']={actionline}\n".format(
+                    config_actions_dname=self.config_client_actions_dict_name, aname=a, actionline=actionline)
+                lines.append(line)
+        return lines
+
+    # Actions
+    def create_config_server_actions_lines(self, actions, action_lists, cbdict):
+        lines = []
+        for a in actions:
+            actionline = self.create_server_action_line(a, actions[a], action_lists[a], 'self.' + cbdict[a]['name'])
+            line = "{config_actions_dname}['{aname}']={actionline}\n".format(
+                config_actions_dname=self.config_server_actions_dict_name, aname=a, actionline=actionline)
+            lines.append(line)
+        return lines
+
             
             
     def create_config_publishers(self,subscribers,tp_lists):
@@ -829,7 +896,10 @@ class MonitorGenerator():
             "{dname}={{}}\n".format(dname=self.config_subs_dict_name),
             "{dname}={{}}\n".format(dname=self.config_client_srvs_dict_name),
             "{dname}={{}}\n".format(dname=self.config_server_srvs_dict_name),
+            "{dname}={{}}\n".format(dname=self.config_client_actions_dict_name), # Actions
+            "{dname}={{}}\n".format(dname=self.config_server_actions_dict_name), # Actions
             "{dname}={{}}\n".format(dname=self.services_info),
+            "{dname}={{}}\n".format(dname=self.actions_info), # Actions
             "{dname}={{}}\n".format(dname=self.messages_dict_name),
             "{varname}=Lock()\n".format(varname=self.threading_loc_name),
             "{0}={1}\n".format(self.monitor_id_vname,self.mon_name_input),
@@ -923,10 +993,7 @@ class MonitorGenerator():
         return lines
     
     
-
-    
-    
-    def create_mon_class_lines(self,topics_with_types_and_action,services_with_types_and_action,monitor_id,silent,oracle_action,oracle_url,oracle_port):
+    def create_mon_class_lines(self, topics_with_types_and_action, services_with_types_and_action, actions_with_types_and_action, monitor_id, silent, oracle_action, oracle_url, oracle_port):
         self.codegenutils.reset_indent("mon class creation start")
         lineprefix = ''
         lines = []
@@ -936,11 +1003,13 @@ class MonitorGenerator():
         lines.append(lineprefix+h_line)
         lines.append(new_line)
         # add the import lines  
-        tp_lists= self.get_topic_and_service_msg_types(topics_with_types_and_action)
-        srv_lists= self.get_topic_and_service_msg_types(services_with_types_and_action)
+        tp_lists = self.get_topic_and_service_msg_types(topics_with_types_and_action)
+        srv_lists = self.get_topic_and_service_msg_types(services_with_types_and_action)
+        action_lists = self.get_action_msg_types(actions_with_types_and_action) # Actions: properly passed
         subscribers = self.get_subscribers(topics_with_types_and_action)
         services = self.get_services(services_with_types_and_action)
-        i_lines = self.create_import_lines(tp_lists,srv_lists)
+        actions = self.get_services(actions_with_types_and_action) # Actions: properly passed
+        i_lines = self.create_import_lines(tp_lists, srv_lists, action_lists) # Actions
         lines = self.codegenutils.append_lines_to_list_with_prefix(lines, i_lines, lineprefix)
         lines.append(new_line)
         # create the class header
@@ -950,55 +1019,53 @@ class MonitorGenerator():
         # increment the line prefix 
         lineprefix = self.codegenutils.inc_indent(lineprefix)
         
-        
-        # do the callbacks 
-        config_callbacks_topic = self.create_config_callbacks_topic(subscribers, tp_lists, silent, oracle_action, oracle_url, oracle_port)
-        # for now just print the call back functions 
-        for t in config_callbacks_topic:
-            cblines = config_callbacks_topic[t]['lines']
+        callbacks_topic = self.create_config_callbacks_topic(subscribers, tp_lists, silent, oracle_action, oracle_url, oracle_port)
+        callbacks_service = self.create_config_callbacks_service(services, srv_lists, silent, oracle_action, oracle_url, oracle_port)
+        callbacks_action = self.create_config_callbacks_action(actions, action_lists, silent, oracle_action, oracle_url, oracle_port)
+
+        all_callbacks = {}
+        all_callbacks.update(callbacks_topic)
+        all_callbacks.update(callbacks_service)
+        all_callbacks.update(callbacks_action)
+
+        # for now just print the callback functions 
+        for cb in all_callbacks:
+            cblines = all_callbacks[cb]['lines']
             lines.append(new_line)
-            lines=self.codegenutils.append_lines_to_list_with_prefix(lines, cblines, lineprefix)
-        config_callbacks_service = self.create_config_callbacks_service(services, srv_lists, silent, oracle_action, oracle_url, oracle_port)
-        # for now just print the call back functions 
-        for s in config_callbacks_service:
-            cblines = config_callbacks_service[s]['lines']
-            lines.append(new_line)
-            lines=self.codegenutils.append_lines_to_list_with_prefix(lines, cblines, lineprefix)
-            
-            
+            lines = self.codegenutils.append_lines_to_list_with_prefix(lines, cblines, lineprefix)
+
         lines.append(new_line)
-        # do the init funciton 
-        init_lines = self.create_init_func(monitor_id,subscribers,tp_lists,services,srv_lists,config_callbacks_topic,config_callbacks_service,oracle_url,oracle_port)
+
+        # do the init function 
+        init_lines = self.create_init_func(monitor_id, subscribers, tp_lists, services, srv_lists, callbacks_topic, callbacks_service, oracle_url, oracle_port)
         lines = self.codegenutils.append_lines_to_list_with_prefix(lines, init_lines, lineprefix)
         lines.append(new_line)
+
         
         # do on message 
         lines.append(new_line)    
-        if oracle_url !=None and oracle_port != None:
+        if oracle_url is not None and oracle_port is not None:
             on_message_lines = self.create_on_message_topic(silent, oracle_action, tp_lists)
-            lines=self.codegenutils.append_lines_to_list_with_prefix(lines,on_message_lines,lineprefix)
+            lines = self.codegenutils.append_lines_to_list_with_prefix(lines, on_message_lines, lineprefix)
 
         if srv_lists:
-            on_message_lines = self.create_on_message_service_request(silent, oracle_action, srv_lists, oracle_url != None and oracle_port != None)
-            lines=self.codegenutils.append_lines_to_list_with_prefix(lines,on_message_lines,lineprefix)
-            on_message_lines = self.create_on_message_service_response(silent, oracle_action, srv_lists, oracle_url != None and oracle_port != None)
-            lines=self.codegenutils.append_lines_to_list_with_prefix(lines,on_message_lines,lineprefix)
+            on_message_lines = self.create_on_message_service_request(silent, oracle_action, srv_lists, oracle_url is not None and oracle_port is not None)
+            lines = self.codegenutils.append_lines_to_list_with_prefix(lines, on_message_lines, lineprefix)
+            on_message_lines = self.create_on_message_service_response(silent, oracle_action, srv_lists, oracle_url is not None and oracle_port is not None)
+            lines = self.codegenutils.append_lines_to_list_with_prefix(lines, on_message_lines, lineprefix)
             
         lines.append(new_line)
         
         # do logging 
         logging_lines = self.create_logging_func()
-        lines=self.codegenutils.append_lines_to_list_with_prefix(lines, logging_lines, lineprefix)
+        lines = self.codegenutils.append_lines_to_list_with_prefix(lines, logging_lines, lineprefix)
         lines.append(new_line)
         
-        # lineprefix = self.codegenutils.dec_indent(lineprefix)
         self.codegenutils.check_indent("mon class creation func ")
 
-        # srvlines = self.create_config_client_services_lines(services,srv_lists)
-        
-        # TBC
-        
         return lines
+
+
                
     def create_service_node(self):
         lines = []
@@ -1032,14 +1099,42 @@ class MonitorGenerator():
         lineprefix = self.codegenutils.dec_indent(lineprefix)
         lineprefix = self.codegenutils.dec_indent(lineprefix)
         return lines
+    
+    def create_action_client_node(self):
+        lines = []
+        lineprefix = ''
+        line = "class ActionClientNode(Node):\n"
+        lines.append(lineprefix + line)
+        lineprefix = self.codegenutils.inc_indent(lineprefix)
+        line = "def __init__(self, action_type, action_name):\n"
+        lines.append(lineprefix + line)
+        lineprefix = self.codegenutils.inc_indent(lineprefix)
+        line = "super().__init__('action_client_node_' + action_name.replace('/', '_'))\n"
+        lines.append(lineprefix + line)
+        line = "self._action_client = ActionClient(self, action_type, action_name)\n"
+        lines.append(lineprefix + line)
+        lineprefix = self.codegenutils.dec_indent(lineprefix)
+        line = "def send_goal(self, goal_msg):\n"
+        lines.append(lineprefix + line)
+        lineprefix = self.codegenutils.inc_indent(lineprefix)
+        line = "future = self._action_client.send_goal_async(goal_msg)\n"
+        lines.append(lineprefix + line)
+        line = "rclpy.spin_until_future_complete(self, future)\n"
+        lines.append(lineprefix + line)
+        line = "return future.result()\n"
+        lines.append(lineprefix + line)
+        lineprefix = self.codegenutils.dec_indent(lineprefix)
+        lineprefix = self.codegenutils.dec_indent(lineprefix)
+        return lines
+
             
         
-    def create_mon_file_lines(self,topics_with_types_and_action,services_with_types_and_action,monitor_id,silent,oracle_action,oracle_url,oracle_port,log):
+    def create_mon_file_lines(self, topics_with_types_and_action, services_with_types_and_action, actions_with_types_and_action, monitor_id, silent, oracle_action, oracle_url, oracle_port, log=False):
         self.codegenutils.reset_indent("mon file func")
         lineprefix = ''
-        lines = self.create_mon_class_lines(topics_with_types_and_action,services_with_types_and_action,monitor_id,silent,oracle_action,oracle_url,oracle_port)
+        lines = self.create_mon_class_lines(topics_with_types_and_action,services_with_types_and_action,actions_with_types_and_action,monitor_id,silent,oracle_action,oracle_url,oracle_port)
         
-        mlines = self.create_main_func_lines(topics_with_types_and_action,services_with_types_and_action,log,monitor_id)
+        mlines = self.create_main_func_lines(topics_with_types_and_action,services_with_types_and_action,actions_with_types_and_action,log,monitor_id)
         lines = self.codegenutils.append_lines_to_list_with_prefix(lines, mlines, lineprefix)
         
         lines.append(self.codegenutils.new_line)
@@ -1050,46 +1145,65 @@ class MonitorGenerator():
         return lines
     
     
-    def create_main_func_lines(self,topics_with_types_and_action,services_with_types_and_action,log,monitor_id):
+    def create_main_func_lines(self, topics_with_types_and_action, services_with_types_and_action, actions_with_types_and_action, log, monitor_id):
         self.codegenutils.reset_indent("create main func ")
         lineprefix = ''
         header = "def main(args=None):\n"
         lines = [header]
         
-        lineprefix=self.codegenutils.inc_indent(lineprefix)
+        lineprefix = self.codegenutils.inc_indent(lineprefix)
         line = "rclpy.init(args=args)\n"
-        lines.append(lineprefix+line)
+        lines.append(lineprefix + line)
         
         line = "log = '{l}'\n".format(l=log)
-        lines.append(lineprefix+line)
+        lines.append(lineprefix + line)
         
         line = "actions = {}\n"
-        lines.append(lineprefix+line)
+        lines.append(lineprefix + line)
+        
+        # Add topics
         for tp in topics_with_types_and_action:
             warning = 0 
             if 'warning' in tp:
                 warning = tp['warning']
-            line = "actions['{tpn}']=('{act}',{w})\n".format(tpn=tp['name'],act=tp['action'],w=warning)
-            lines.append(lineprefix+line)
+            line = "actions['{tpn}']=('{act}',{w})\n".format(tpn=tp['name'], act=tp['action'], w=warning)
+            lines.append(lineprefix + line)
+        
+        # Add services
         for srv in services_with_types_and_action:
             warning = 0 
             if 'warning' in srv:
                 warning = srv['warning']
-            line = "actions['{srvn}']=('{act}',{w})\n".format(srvn=srv['name'],act=srv['action'],w=warning)
-            lines.append(lineprefix+line)
+            line = "actions['{srvn}']=('{act}',{w})\n".format(srvn=srv['name'], act=srv['action'], w=warning)
+            lines.append(lineprefix + line)
+
+        # Add actions
+        for act in actions_with_types_and_action:
+            warning = 0
+            if 'warning' in act:
+                warning = act['warning']
+            line = "actions['{actn}']=('{act}',{w})\n".format(actn=act['name'], act=act['action'], w=warning)
+            lines.append(lineprefix + line)
         
-        line = "monitor = {mclassname}('{mid}',log,actions)\n".format(mclassname=self.get_mon_class_name(monitor_id),mid=monitor_id)
+        # Create monitor
+        line = "monitor = {mclassname}('{mid}', log, actions)\n".format(
+            mclassname=self.get_mon_class_name(monitor_id),
+            mid=monitor_id
+        )
+        lines.append(lineprefix + line)
         
-        lines.append(lineprefix+line)
-        mlines = ["rclpy.spin(monitor)\n",
-                "monitor.{wsname}.close()\n".format(wsname=self.websocket_name.replace("self.","")),
-                "monitor.destroy_node()\n",
-                "rclpy.shutdown()\n"
-                ]
-        lines=self.codegenutils.append_lines_to_list_with_prefix(lines, mlines, lineprefix)
+        # Spin + shutdown
+        mlines = [
+            "rclpy.spin(monitor)\n",
+            "monitor.{wsname}.close()\n".format(wsname=self.websocket_name.replace("self.", "")),
+            "monitor.destroy_node()\n",
+            "rclpy.shutdown()\n"
+        ]
+        lines = self.codegenutils.append_lines_to_list_with_prefix(lines, mlines, lineprefix)
         
         self.codegenutils.check_indent("create main func ")
         return lines
+
      
     
     
@@ -1103,10 +1217,8 @@ class MonitorGenerator():
         self.codegenutils.check_indent("create python main func ")
         return lines   
     
-
-
                   
-    def create_import_lines(self, tp_lists, srv_lists):
+    def create_import_lines(self, tp_lists, srv_lists, action_lists):
         plain_import = ['json',
                         'yaml',
                         'websocket',
@@ -1129,6 +1241,11 @@ class MonitorGenerator():
             package = srv_lists[srv]['package']
             # type = srv_lists[srv]['type']
             if not package in from_import:
+                from_import[package] = '*'
+        # Actions
+        for act in action_lists:
+            package = action_lists[act]['package']
+            if package not in from_import:
                 from_import[package] = '*'
         
         ''' now lets generate the lines  '''
@@ -1157,6 +1274,26 @@ class MonitorGenerator():
         for service in services:
             callbacks[service] = self.create_callback_func_service(service,services[service],srv_lists[service],silent,oracle_action,oracle_url,oracle_port)
         return callbacks
+    
+    # Actions
+    def create_config_callbacks_action(self, actions, action_lists, silent, oracle_action, oracle_url, oracle_port):
+        callbacks = {}
+        for action in actions:
+            callbacks[action] = self.create_callback_func_action(action, actions[action], action_lists[action], silent, oracle_action, oracle_url, oracle_port)
+        return callbacks
+    
+    # Actions
+    def generate_callback_functions(self, subscribers, services, actions, tp_lists, srv_lists, action_lists, silent, oracle_action, oracle_url, oracle_port):
+        callbacks_topic = self.create_config_callbacks_topic(subscribers, tp_lists, silent, oracle_action, oracle_url, oracle_port)
+        callbacks_service = self.create_config_callbacks_service(services, srv_lists, silent, oracle_action, oracle_url, oracle_port)
+        callbacks_action = self.create_config_callbacks_action(actions, action_lists, silent, oracle_action, oracle_url, oracle_port)
+        
+        all_callbacks = {}
+        all_callbacks.update(callbacks_topic)
+        all_callbacks.update(callbacks_service)
+        all_callbacks.update(callbacks_action)
+        
+        return all_callbacks
     
 
     def create_callback_func_topic(self, tname, tinfo, tmsg_type, silent, oracle_action, oracle_url, oracle_port):
@@ -1332,6 +1469,78 @@ class MonitorGenerator():
         self.codegenutils.check_indent("create callback func done")   
         return {'name':func_name, 'lines':lines}
 
+    def create_callback_func_action(self, actionname, actioninfo, actionmsg_type, silent, oracle_action, oracle_url, oracle_port):
+        self.codegenutils.reset_indent("callback func action start")
+        if actioninfo['remapped']:
+            actionname = self.get_remapped_name(actionname)
+        lineprefix = self.codegenutils.inc_indent('')
+        func_name = "callback{actname}".format(actname=actionname).replace('/', '_')
+        func_input_varname = 'goal_msg'
+        header = "def {fname}(self, {f_input}):\n".format(fname=func_name, f_input=func_input_varname)
+        lines = [header]
+
+        data_dict_name = "dict"
+
+        # log output if not silent
+        if not silent:
+            message = '"monitor has observed an action goal with "+ str({0})'.format(func_input_varname)
+            line = self.codegenutils.get_ros_info_logging_line(message)
+            lines.append(lineprefix + line)
+
+        # convert the goal message into a dictionary
+        line = "dict = {}\n"
+        lines.append(lineprefix + line)
+        line = "{0}['goal'] = rosidl_runtime_py.message_to_ordereddict({1})\n".format(data_dict_name, func_input_varname)
+        lines.append(lineprefix + line)
+        line = "{data_dict_name}['action'] = '{aname}'\n".format(data_dict_name=data_dict_name, aname=actionname.replace('_mon', ''))
+        lines.append(lineprefix + line)
+        line = "{data_dict_name}['time'] = {ros_time}\n".format(data_dict_name=data_dict_name, ros_time=self.codegenutils.get_ros_time_line())
+        lines.append(lineprefix + line)
+
+        line = "{ws_lock}.acquire()\n".format(ws_lock=self.threading_loc_name)
+        lines.append(lineprefix + line)
+
+        if oracle_action == 'nothing':
+            line = "while {data_dname}['time'] in {msg_dname}:\n".format(data_dname=data_dict_name, msg_dname=self.messages_dict_name)
+            lines.append(lineprefix + line)
+            lineprefix = self.codegenutils.inc_indent(lineprefix)
+            line = "{data_dname}['time'] += 0.01\n".format(data_dname=data_dict_name)
+            lines.append(lineprefix + line)
+            lineprefix = self.codegenutils.dec_indent(lineprefix)
+
+        do_oracle = oracle_url is not None and oracle_port is not None
+        oracle_response_varname = "message"
+
+        if do_oracle:
+            line = "{ws}.send(json.dumps({data_dname}))\n".format(ws=self.websocket_name, data_dname=data_dict_name)
+            lines.append(lineprefix + line)
+            if oracle_action == 'nothing':
+                line = "{msgs_dname}[{data_dname}['time']] = {input_varname}\n".format(
+                    msgs_dname=self.messages_dict_name,
+                    data_dname=data_dict_name,
+                    input_varname=func_input_varname
+                )
+                lines.append(lineprefix + line)
+            line = "{msg} = {ws}.recv()\n".format(msg=oracle_response_varname, ws=self.websocket_name)
+            lines.append(lineprefix + line)
+        else:
+            line = "{logging_fname}({data_dname})\n".format(logging_fname=self.logging_fname, data_dname=data_dict_name)
+            lines.append(lineprefix + line)
+
+        line = "{ws_lock}.release()\n".format(ws_lock=self.threading_loc_name)
+        lines.append(lineprefix + line)
+
+        if not silent:
+            line = self.codegenutils.get_ros_info_logging_line('"' + "action goal processed" + '"')
+            lines.append(lineprefix + line)
+
+        if do_oracle:
+            line = "{msg_fname}({msg_vname})\n".format(msg_fname=self.message_received_fname_topic, msg_vname=oracle_response_varname)
+            lines.append(lineprefix + line)
+
+        self.codegenutils.check_indent("callback func action done")
+        return {'name': func_name, 'lines': lines}
+
         
     def create_inherent_monitor_publisher_lines(self):
         pub_types = {'error':'MonitorError', 'verdict':'String'}
@@ -1372,16 +1581,22 @@ class MonitorGenerator():
         # ET.dump(root)
         tree.write(location+'package.xml')
         
-    def generate_monitor_package(self,monitor_id, topics_with_types_and_action, services_with_types_and_action, log, url, port, oracle_action, silent, warning):
+    def generate_monitor_package(self, monitor_id, topics_with_types_and_action, services_with_types_and_action, actions_with_types_and_action, log, oracle_url=None, oracle_port=None, oracle_action=None, silent=False, warning=0):
         monloc = 'code/monitor/monitor/'
         packageloc = 'code/monitor/'
-        lines = self.create_mon_file_lines(topics_with_types_and_action, services_with_types_and_action, monitor_id, silent, oracle_action, url, port, log)
+        lines = self.create_mon_file_lines(topics_with_types_and_action, services_with_types_and_action, actions_with_types_and_action, monitor_id, silent, oracle_action, oracle_url, oracle_port, log)
+
         if services_with_types_and_action:
             lines.extend(self.create_service_node())
+        # Actions
+        if actions_with_types_and_action:
+            lines.extend(self.create_action_client_node())
         tp_lists = self.get_topic_and_service_msg_types(topics_with_types_and_action)
         tp_lists.update(self.get_topic_and_service_msg_types(services_with_types_and_action))
+        tp_lists.update(self.get_topic_and_service_msg_types(actions_with_types_and_action)) # Actions also!
         self.codegenutils.write_lines(lines, monitor_id, monloc)
         self.create_package_xml(tp_lists, packageloc)
+
             
             
 class LaunchFileGen(object):
@@ -1411,15 +1626,15 @@ class LaunchFileGen(object):
         tree.write(locfn)
     
     
-    def instrument_node_launch_files(self,nodes):
-        launch_files={}
+    def instrument_node_launch_files(self, nodes):
+        launch_files = {}
         if not nodes:
             return 
         for name in nodes:
-            (package,path,topics) = nodes[name]
+            (package, path, topics) = nodes[name]
             if path not in launch_files:
                 launch_files[path] = []
-            launch_files[path].append((name,package,topics))
+            launch_files[path].append((name, package, topics))
         for path in launch_files:
             file_name = path.replace('.launch', '_instrumented.launch')
             tree = ET.parse(path)
@@ -1431,8 +1646,17 @@ class LaunchFileGen(object):
                             remap = ET.SubElement(node, 'remap')
                             remap.set('from', topic)
                             remap.set('to', topic + '_mon')
+
+                            # Action Special Handling
+                            # Only add if the topic is not already a subtopic (goal, feedback, result)
+                            if not (topic.endswith('/goal') or topic.endswith('/result') or topic.endswith('/feedback')):
+                                for suffix in ['/goal', '/result', '/feedback']:
+                                    remap_sub = ET.SubElement(node, 'remap')
+                                    remap_sub.set('from', topic + suffix)
+                                    remap_sub.set('to', topic + '_mon' + suffix)
                         break
-            self.write_launch_file(launch, file_name)    
+            self.write_launch_file(launch, file_name)
+   
             
                
 

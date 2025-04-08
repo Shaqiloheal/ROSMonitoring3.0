@@ -1,18 +1,18 @@
 path: /home/shaqiloheal/ros2_ws/src/
 
 nodes:
-  - node:
-      name: talker
-      package: py_pubsub
-      path: /home/shaqiloheal/ros2_ws/src/py_pubsub/run.launch
-  - node:
-      name: listener
-      package: py_pubsub
-      path: /home/shaqiloheal/ros2_ws/src/py_pubsub/run.launch
-  - node:
-      name: temperature_publisher
-      package: temperature_sensor
-      path: /home/shaqiloheal/ros2_ws/src/temperature_sensor/run.launch
+  # - node:
+  #     name: talker
+  #     package: py_pubsub
+  #     path: /home/shaqiloheal/ros2_ws/src/py_pubsub/run.launch
+  # - node:
+  #     name: listener
+  #     package: py_pubsub
+  #     path: /home/shaqiloheal/ros2_ws/src/py_pubsub/run.launch
+  # - node:
+  #     name: temperature_publisher
+  #     package: temperature_sensor
+  #     path: /home/shaqiloheal/ros2_ws/src/temperature_sensor/run.launch
   # - node:
   #     name: minimal_service
   #     package: py_srvcli
@@ -21,40 +21,61 @@ nodes:
   #     name: minimal_client_async
   #     package: py_srvcli
   #     path: /home/shaqiloheal/ros2_ws/src/py_srvcli/run.launch
+  - node:
+        name: fibonacci_action_server
+        package: fibonacci
+        path: /home/shaqiloheal/ros2_ws/src/fibonacci/run.launch
+  - node:
+        name: fibonacci_action_client
+        package: fibonacci
+        path: /home/shaqiloheal/ros2_ws/src/fibonacci/run.launch
 
 monitors:
-  - monitor:
-      id: monitor_pubsub
-      log: ./log_pubsub.txt
-      silent: False
-      oracle:
-        port: 8080
-        url: 127.0.0.1
-        action: nothing
-      topics:
-        - name: chatter
-          type: std_msgs.msg.String
-          action: filter
-          publishers:
-            - talker
-        - name: numbers
-          type: std_msgs.msg.Int32
-          action: log
-        - name: status
-          type: std_msgs.msg.Bool
-          action: log
+  # - monitor:
+  #     id: monitor_pubsub
+  #     log: ./log_pubsub.txt
+  #     silent: False
+  #     oracle:
+  #       port: 8080
+  #       url: 127.0.0.1
+  #       action: nothing
+  #     topics:
+  #       - name: chatter
+  #         type: std_msgs.msg.String
+  #         action: filter
+  #         publishers:
+  #           - talker
+  #       - name: numbers
+  #         type: std_msgs.msg.Int32
+  #         action: log
+  #       - name: status
+  #         type: std_msgs.msg.Bool
+  #         action: log
+
+  # - monitor:
+  #     id: monitor_temperature
+  #     log: ./log_temperature.txt
+  #     silent: False
+  #     oracle:
+  #       port: 8080
+  #       url: 127.0.0.1
+  #       action: nothing
+  #     topics:
+  #       - name: temperature
+  #         type: std_msgs.msg.Float32
+  #         action: log
 
   - monitor:
-      id: monitor_temperature
-      log: ./log_temperature.txt
+      id: monitor_0
+      log: ./log.txt
       silent: False
       oracle:
         port: 8080
         url: 127.0.0.1
         action: nothing
-      topics:
-        - name: temperature
-          type: std_msgs.msg.Float32
+      actions:
+        - name: fibonacci
+          type: custom_action_interfaces.action.Fibonacci
           action: log
 
   # - monitor:

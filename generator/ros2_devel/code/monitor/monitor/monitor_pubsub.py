@@ -23,14 +23,9 @@ class ROSMonitor_monitor_pubsub(Node):
 		dict['topic']='chatter'
 		dict['time']=float(self.get_clock().now().to_msg().sec)
 		self.ws_lock.acquire()
-		while dict['time'] in self.dict_msgs:
-			dict['time']+=0.01
-		self.ws.send(json.dumps(dict))
-		self.dict_msgs[dict['time']] = data
-		message=self.ws.recv()
+		self.logging(dict)
 		self.ws_lock.release()
-		self.get_logger().info("event propagated to oracle")
-		self.on_message_topic(message)
+		self.get_logger().info("event successfully logged")
 
 	def callbacknumbers(self,data):
 		self.get_logger().info("monitor has observed "+ str(data))
@@ -38,14 +33,9 @@ class ROSMonitor_monitor_pubsub(Node):
 		dict['topic']='numbers'
 		dict['time']=float(self.get_clock().now().to_msg().sec)
 		self.ws_lock.acquire()
-		while dict['time'] in self.dict_msgs:
-			dict['time']+=0.01
-		self.ws.send(json.dumps(dict))
-		self.dict_msgs[dict['time']] = data
-		message=self.ws.recv()
+		self.logging(dict)
 		self.ws_lock.release()
-		self.get_logger().info("event propagated to oracle")
-		self.on_message_topic(message)
+		self.get_logger().info("event successfully logged")
 
 	def callbackstatus(self,data):
 		self.get_logger().info("monitor has observed "+ str(data))
@@ -53,14 +43,9 @@ class ROSMonitor_monitor_pubsub(Node):
 		dict['topic']='status'
 		dict['time']=float(self.get_clock().now().to_msg().sec)
 		self.ws_lock.acquire()
-		while dict['time'] in self.dict_msgs:
-			dict['time']+=0.01
-		self.ws.send(json.dumps(dict))
-		self.dict_msgs[dict['time']] = data
-		message=self.ws.recv()
+		self.logging(dict)
 		self.ws_lock.release()
-		self.get_logger().info("event propagated to oracle")
-		self.on_message_topic(message)
+		self.get_logger().info("event successfully logged")
 
 	def __init__(self,monitor_name,log,actions):
 		self.monitor_publishers={}
@@ -68,7 +53,10 @@ class ROSMonitor_monitor_pubsub(Node):
 		self.config_subscribers={}
 		self.config_client_services={}
 		self.config_server_services={}
+		self.config_client_actions={}
+		self.config_server_actions={}
 		self.services_info={}
+		self.actions_info={}
 		self.dict_msgs={}
 		self.ws_lock=Lock()
 		self.name=monitor_name
@@ -83,13 +71,11 @@ class ROSMonitor_monitor_pubsub(Node):
 
 		# done creating monitor publishers
 
-		self.config_publishers['chatter']=self.create_publisher(topic='chatter',msg_type=String,qos_profile=1000)
-
-		self.publish_topics=True
+		self.publish_topics=False
 		self.topics_info['chatter']={'package': 'std_msgs.msg', 'type': 'String'}
 		self.topics_info['numbers']={'package': 'std_msgs.msg', 'type': 'Int32'}
 		self.topics_info['status']={'package': 'std_msgs.msg', 'type': 'Bool'}
-		self.config_subscribers['chatter']=self.create_subscription(topic='chatter_mon',msg_type=String,callback=self.callbackchatter,qos_profile=1000)
+		self.config_subscribers['chatter']=self.create_subscription(topic='chatter',msg_type=String,callback=self.callbackchatter,qos_profile=1000)
 
 		self.config_subscribers['numbers']=self.create_subscription(topic='numbers',msg_type=Int32,callback=self.callbacknumbers,qos_profile=1000)
 
@@ -97,49 +83,8 @@ class ROSMonitor_monitor_pubsub(Node):
 
 		self.get_logger().info('Monitor' + self.name + ' started and ready' )
 		self.get_logger().info('Logging at' + self.logfn )
-		websocket.enableTrace(True)
-		self.ws = websocket.WebSocket()
-		self.ws.connect('ws://127.0.0.1:8080')
-		self.get_logger().info('Websocket is open')
 
 
-	def on_message_topic(self,message):
-		json_dict = json.loads(message)
-		verdict = str(json_dict['verdict'])
-		if verdict == 'true' or verdict == 'currently_true' or verdict == 'unknown':
-			if verdict == 'true' and not self.publish_topics:
-				self.get_logger().info('The monitor concluded the satisfaction of the property under analysis and can be safely removed.')
-				self.ws.close()
-				exit(0)
-			else:
-				self.logging(json_dict)
-				topic = json_dict['topic']
-				self.get_logger().info('The event '+message+' is consistent and republished')
-				if topic in self.config_publishers:
-					self.config_publishers[topic].publish(self.dict_msgs[json_dict['time']])
-				del self.dict_msgs[json_dict['time']]
-		else:
-			self.logging(json_dict)
-			self.get_logger().info('The event' + message + ' is inconsistent' )
-			error = MonitorError()
-			error.m_topic = json_dict['topic']
-			error.m_time = json_dict['time']
-			error.m_property = json_dict['spec']
-			error.m_content = str(self.dict_msgs[json_dict['time']])
-			self.monitor_publishers['error'].publish(error)
-			if verdict == 'false' and not self.publish_topics:
-				self.get_logger().info('The monitor concluded the violation of the property under analysis and can be safely removed.')
-				self.ws.close()
-				exit(0)
-			if self.actions[json_dict['topic']][0] != 'filter':
-				topic = json_dict['topic']
-				if topic in self.config_publishers:
-					self.config_publishers[topic].publish(self.dict_msgs[json_dict['time']])
-				del self.dict_msgs[json_dict['time']]
-			error=True
-		verdict_msg = String()
-		verdict_msg.data = verdict
-		self.monitor_publishers['verdict'].publish(verdict_msg)
 
 	def logging(self,json_dict):
 		try:
@@ -153,10 +98,10 @@ def main(args=None):
 	rclpy.init(args=args)
 	log = './log_pubsub.txt'
 	actions = {}
-	actions['chatter']=('filter',0)
+	actions['chatter']=('log',0)
 	actions['numbers']=('log',0)
 	actions['status']=('log',0)
-	monitor = ROSMonitor_monitor_pubsub('monitor_pubsub',log,actions)
+	monitor = ROSMonitor_monitor_pubsub('monitor_pubsub', log, actions)
 	rclpy.spin(monitor)
 	monitor.ws.close()
 	monitor.destroy_node()

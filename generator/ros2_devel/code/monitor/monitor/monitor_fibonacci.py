@@ -15,7 +15,7 @@ from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
 from custom_action_interfaces.action import *
 # done import
 
-class ROSMonitor_monitor_0(Node):
+class ROSMonitor_monitor_fibonacci(Node):
 
 
 	def callbackfibonacci_mon(self, goal_msg):
@@ -115,10 +115,10 @@ class ROSMonitor_monitor_0(Node):
 
 def main(args=None):
 	rclpy.init(args=args)
-	log = './log.txt'
+	log = './log_fibonacci.txt'
 	actions = {}
 	actions['fibonacci']=('log',0)
-	monitor = ROSMonitor_monitor_0('monitor_0', log, actions)
+	monitor = ROSMonitor_monitor_fibonacci('monitor_fibonacci', log, actions)
 	rclpy.spin(monitor)
 	monitor.ws.close()
 	monitor.destroy_node()
