@@ -22,13 +22,13 @@ nodes:
   #     package: py_srvcli
   #     path: /home/shaqiloheal/ros2_ws/src/py_srvcli/run.launch
     - node:
-        name: fibonacci_action_server
-        package: fibonacci
-        path: /home/shaqiloheal/ros2_ws/src/fibonacci/run.launch
+        name: battery_action_server
+        package: battery
+        path: /home/shaqiloheal/ros2_ws/src/battery/run.launch
     - node:
-        name: fibonacci_action_client
-        package: fibonacci
-        path: /home/shaqiloheal/ros2_ws/src/fibonacci/run.launch
+        name: battery_action_client
+        package: battery
+        path: /home/shaqiloheal/ros2_ws/src/battery/run.launch
 
 monitors:
   # - monitor:
@@ -65,10 +65,10 @@ monitors:
   #         action: log
     
   - monitor:
-      id: monitor_fibonacci
-      log: ./log_fibonacci.txt
+      id: monitor_bat
+      log: ./log_battery.txt
       silent: False
       actions:
-        - name: /fibonacci
-          type: custom_action_interfaces.action.Fibonacci
+        - name: /battery
+          type: custom_action_interfaces.action.Battery
           action: log
