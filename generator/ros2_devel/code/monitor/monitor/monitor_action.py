@@ -12,15 +12,36 @@ from threading import *
 from rosmonitoring_interfaces.msg import MonitorError
 from std_msgs.msg import *
 from rclpy.callback_groups import MutuallyExclusiveCallbackGroup
+from custom_action_interfaces.action.Fibonacci import *
 # done import
 
-class ROSMonitor_monitor_pubsub(Node):
+class ROSMonitor_monitor_action(Node):
 
 
-	def callbackchatter(self,data):
+	def callbackfibonacci__goal(self,data):
 		self.get_logger().info("monitor has observed "+ str(data))
 		dict= rosidl_runtime_py.message_to_ordereddict(data)
-		dict['topic']='chatter'
+		dict['topic']='fibonacci/_goal'
+		dict['time']=float(self.get_clock().now().to_msg().sec)
+		self.ws_lock.acquire()
+		self.logging(dict)
+		self.ws_lock.release()
+		self.get_logger().info("event successfully logged")
+
+	def callbackfibonacci__feedback(self,data):
+		self.get_logger().info("monitor has observed "+ str(data))
+		dict= rosidl_runtime_py.message_to_ordereddict(data)
+		dict['topic']='fibonacci/_feedback'
+		dict['time']=float(self.get_clock().now().to_msg().sec)
+		self.ws_lock.acquire()
+		self.logging(dict)
+		self.ws_lock.release()
+		self.get_logger().info("event successfully logged")
+
+	def callbackfibonacci__result(self,data):
+		self.get_logger().info("monitor has observed "+ str(data))
+		dict= rosidl_runtime_py.message_to_ordereddict(data)
+		dict['topic']='fibonacci/_result'
 		dict['time']=float(self.get_clock().now().to_msg().sec)
 		self.ws_lock.acquire()
 		self.logging(dict)
@@ -52,8 +73,14 @@ class ROSMonitor_monitor_pubsub(Node):
 		# done creating monitor publishers
 
 		self.publish_topics=False
-		self.topics_info['chatter']={'package': 'std_msgs.msg', 'type': 'String'}
-		self.config_subscribers['chatter']=self.create_subscription(topic='chatter',msg_type=String,callback=self.callbackchatter,qos_profile=1000)
+		self.topics_info['fibonacci/_goal']={'package': 'custom_action_interfaces.action.Fibonacci', 'type': 'Goal'}
+		self.topics_info['fibonacci/_feedback']={'package': 'custom_action_interfaces.action.Fibonacci', 'type': 'Feedback'}
+		self.topics_info['fibonacci/_result']={'package': 'custom_action_interfaces.action.Fibonacci', 'type': 'Result'}
+		self.config_subscribers['fibonacci/_goal']=self.create_subscription(topic='fibonacci/_goal',msg_type=Goal,callback=self.callbackfibonacci__goal,qos_profile=1000)
+
+		self.config_subscribers['fibonacci/_feedback']=self.create_subscription(topic='fibonacci/_feedback',msg_type=Feedback,callback=self.callbackfibonacci__feedback,qos_profile=1000)
+
+		self.config_subscribers['fibonacci/_result']=self.create_subscription(topic='fibonacci/_result',msg_type=Result,callback=self.callbackfibonacci__result,qos_profile=1000)
 
 		self.get_logger().info('Monitor' + self.name + ' started and ready' )
 		self.get_logger().info('Logging at' + self.logfn )
@@ -70,10 +97,12 @@ class ROSMonitor_monitor_pubsub(Node):
 
 def main(args=None):
 	rclpy.init(args=args)
-	log = './log_pubsub.txt'
+	log = './log_action.txt'
 	actions = {}
-	actions['chatter']=('log',0)
-	monitor = ROSMonitor_monitor_pubsub('monitor_pubsub', log, actions)
+	actions['fibonacci/_goal']=('log',0)
+	actions['fibonacci/_feedback']=('log',0)
+	actions['fibonacci/_result']=('log',0)
+	monitor = ROSMonitor_monitor_action('monitor_action', log, actions)
 	rclpy.spin(monitor)
 	monitor.ws.close()
 	monitor.destroy_node()

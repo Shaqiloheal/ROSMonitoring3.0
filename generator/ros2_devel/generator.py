@@ -1624,38 +1624,49 @@ class LaunchFileGen(object):
         tree = ET.ElementTree(root_elem)
         print("writing to "+locfn)
         tree.write(locfn)
+
+    # Actions
+    def generate_action_remaps(self, action_name):
+        remaps = []
+        for suffix in ['/goal', '/result', '/feedback']:
+            remaps.append((action_name + suffix, action_name + '_mon' + suffix))
+        return remaps
     
     
     def instrument_node_launch_files(self, nodes):
         launch_files = {}
         if not nodes:
-            return 
+            return
         for name in nodes:
             (package, path, topics) = nodes[name]
             if path not in launch_files:
                 launch_files[path] = []
             launch_files[path].append((name, package, topics))
+
         for path in launch_files:
             file_name = path.replace('.launch', '_instrumented.launch')
             tree = ET.parse(path)
             launch = tree.getroot()
+
             for node in launch.findall('node'):
                 for (name, package, topics) in launch_files[path]:
                     if node.get('name') == name and node.get('pkg') == package:
                         for topic in topics:
+                            # Main topic remap
                             remap = ET.SubElement(node, 'remap')
                             remap.set('from', topic)
                             remap.set('to', topic + '_mon')
 
-                            # Action Special Handling
-                            # Only add if the topic is not already a subtopic (goal, feedback, result)
+                            # Action subtopics remap
                             if not (topic.endswith('/goal') or topic.endswith('/result') or topic.endswith('/feedback')):
-                                for suffix in ['/goal', '/result', '/feedback']:
+                                action_remaps = self.generate_action_remaps(topic)
+                                for (from_topic, to_topic) in action_remaps:
                                     remap_sub = ET.SubElement(node, 'remap')
-                                    remap_sub.set('from', topic + suffix)
-                                    remap_sub.set('to', topic + '_mon' + suffix)
-                        break
+                                    remap_sub.set('from', from_topic)
+                                    remap_sub.set('to', to_topic)
+                        break  # Node matched, move to next
             self.write_launch_file(launch, file_name)
+
    
             
                

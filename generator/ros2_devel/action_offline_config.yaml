@@ -6,12 +6,12 @@ nodes: # the nodes we are going to monitor
       package: fibonacci  # <- your fibonacci package
       path: /home/shaqiloheal/ros2_ws/src/fibonacci/run.launch  # <- the script to run
 
-monitors: # the monitors we are going to generate
+monitors:
   - monitor:
-      id: monitor_action  # <- the monitor's name
-      log: ./log_action.txt  # <- output log file
-      silent: False  # <- see output in the terminal
-      topics:  # <- the topics you want to monitor
+      id: monitor_action
+      log: ./log_action.txt
+      silent: False
+      actions:  # <- NOT actions here because it's offline
         - name: fibonacci/_goal
           type: custom_action_interfaces.action.Fibonacci.Goal
           action: log

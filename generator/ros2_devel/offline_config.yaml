@@ -31,14 +31,14 @@ nodes:
         path: /home/shaqiloheal/ros2_ws/src/fibonacci/run.launch
 
 monitors:
-#   - monitor:
-#       id: monitor_pubsub
-#       log: ./log_pubsub.txt
-#       silent: False
-#       topics:
-#         - name: chatter
-#           type: std_msgs.msg.String
-#           action: log
+  # - monitor:
+  #     id: monitor_pubsub
+  #     log: ./log_pubsub.txt
+  #     silent: False
+  #     topics:
+  #       - name: chatter
+  #         type: std_msgs.msg.String
+  #         action: log
 #         - name: numbers
 #           type: std_msgs.msg.Int32
 #           action: log
@@ -69,6 +69,6 @@ monitors:
       log: ./log_fibonacci.txt
       silent: False
       actions:
-        - name: fibonacci
+        - name: /fibonacci
           type: custom_action_interfaces.action.Fibonacci
           action: log
