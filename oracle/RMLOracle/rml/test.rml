@@ -1,4 +1,5 @@
-overheat_temperature matches {topic:'temperature', data:val} with val > 50.0;
-good_temperature matches {topic:'temperature', data:val} with val >= 0.0 && val <= 50.0;
+low_battery matches {topic:'battery_percentage', data:val} with val >= 0.0 && val < 20.0;
+normal_battery matches {topic:'battery_percentage', data:val} with val >= 20.0 && val <= 100.0;
+invalid_battery matches {topic:'battery_percentage', data:val} with val < 0.0 || val > 100.0;
 
-Main = (good_temperature \/ negative_temperature \/ overheat_temperature)*;
+Main = (normal_battery)*;

@@ -1,0 +1,14 @@
+charging_feedback matches {current_percentage:val} with val >= 0.0 && val <= 100.0;
+charging_result matches {success:true};
+
+Main = (charging_feedback)+ (charging_result)?;
+
+final charging_feedback
+{
+    message: "Charging is in progress."
+}
+
+final charging_result
+{
+    message: "Charge cycle completed successfully."
+}
